@@ -122,7 +122,6 @@ def grid_to_configs(grid):
             prob_threshold_obs=params['prob_threshold_obs'],
             depth_jump_threshold=params['depth_jump_threshold'],
             # Stage 4+5 desactivados para aislar Stage 3
-            enable_shadow_validation=False,
             enable_cluster_filtering=False,
             verbose=False,
         )
@@ -137,7 +136,6 @@ def grid_to_configs(grid):
 def run_stage2_baseline(seq, scan_start, n_frames, poses, gt_mask):
     """Ejecuta Stage 2 solo como referencia."""
     config = PipelineConfig(
-        enable_shadow_validation=False,
         enable_cluster_filtering=False,
         verbose=False,
     )

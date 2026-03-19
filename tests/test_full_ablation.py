@@ -5,9 +5,7 @@ Test Ablation Completo del Pipeline
 Ablation acumulativo: cada stage se añade progresivamente para medir su contribución.
 - Config 1: Stage 2 solo (single-frame baseline)
 - Config 2: Stage 2 → 3 (+ Bayesian temporal con gamma adaptativo)
-- Config 3: Stage 2 → 3 → 4 (+ Shadow Validation)
-- Config 4: Stage 2 → 3 → 4 → 5 (+ DBSCAN Cluster Filtering) [pipeline completo]
-- Config 5: Stage 2 → 3 → 5 (sin Shadow, con DBSCAN) [¿shadow es necesario?]
+- Config 3: Stage 2 → 3 → 4 (+ DBSCAN Cluster Filtering) [pipeline completo]
 
 Métricas: Precision, Recall, F1, FP, FN + timing desglosado por stage.
 Secuencias: KITTI 00 (urbano) y 04 (highway).
@@ -95,36 +93,18 @@ def get_ablation_configs(include_hcd_ablation=False):
         'Stage 2 (baseline)': PipelineConfig(
             enable_hybrid_wall_rejection=True,
             enable_hcd=True,
-            enable_shadow_validation=False,
             enable_cluster_filtering=False,
             verbose=False
         ),
         'Stage 2→3': PipelineConfig(
             enable_hybrid_wall_rejection=True,
             enable_hcd=True,
-            enable_shadow_validation=False,
             enable_cluster_filtering=False,
             verbose=False
         ),
         'Stage 2→3→4': PipelineConfig(
             enable_hybrid_wall_rejection=True,
             enable_hcd=True,
-            enable_shadow_validation=True,
-            enable_cluster_filtering=False,
-            verbose=False
-        ),
-        'Stage 2→3→4→5': PipelineConfig(
-            enable_hybrid_wall_rejection=True,
-            enable_hcd=True,
-            enable_shadow_validation=True,
-            enable_cluster_filtering=True,
-            cluster_min_pts=15,
-            verbose=False
-        ),
-        'Stage 2→3→5 (no shadow)': PipelineConfig(
-            enable_hybrid_wall_rejection=True,
-            enable_hcd=True,
-            enable_shadow_validation=False,
             enable_cluster_filtering=True,
             cluster_min_pts=15,
             verbose=False
@@ -136,14 +116,12 @@ def get_ablation_configs(include_hcd_ablation=False):
         configs['Stage 2 (sin HCD)'] = PipelineConfig(
             enable_hybrid_wall_rejection=True,
             enable_hcd=False,
-            enable_shadow_validation=False,
             enable_cluster_filtering=False,
             verbose=False
         )
-        configs['Stage 2→3→4→5 (sin HCD)'] = PipelineConfig(
+        configs['Stage 2→3→4 (sin HCD)'] = PipelineConfig(
             enable_hybrid_wall_rejection=True,
             enable_hcd=False,
-            enable_shadow_validation=True,
             enable_cluster_filtering=True,
             cluster_min_pts=15,
             verbose=False
@@ -170,7 +148,6 @@ def run_config(config_name, config, seq, scan_start, n_frames, poses):
             'timing_s12_ms': result.get('timing_total_ms', 0),
             'timing_stage3_ms': 0,
             'timing_stage4_ms': 0,
-            'timing_stage5_ms': 0,
             'timing_total_ms': result.get('timing_total_ms', 0),
         }
 
@@ -184,8 +161,6 @@ def run_config(config_name, config, seq, scan_start, n_frames, poses):
 
         # Elegir método según config
         if config.enable_cluster_filtering:
-            result = pipeline.stage5_per_point(pts, delta_pose=delta_pose)
-        elif config.enable_shadow_validation:
             result = pipeline.stage4_per_point(pts, delta_pose=delta_pose)
         else:
             result = pipeline.stage3_per_point(pts, delta_pose=delta_pose)
@@ -195,18 +170,16 @@ def run_config(config_name, config, seq, scan_start, n_frames, poses):
     # timing_stage3_ms incluye stage2 internamente, así que restamos
     t_s3 = result.get('timing_stage3_ms', 0)
     t_s4 = result.get('timing_stage4_ms', 0)
-    t_s5 = result.get('timing_stage5_ms', 0)
     t_total = result.get('timing_total_ms', 0)
-    # Stage 1+2 = total - stage3 - stage4 - stage5 (stage3 ya incluye s1+s2 internamente)
+    # Stage 1+2 = total - stage3 - stage4 (stage3 ya incluye s1+s2 internamente)
     # Pero timing_stage3_ms es solo el tiempo de warp+bayes, no incluye s1+s2
-    # timing_total_ms = s1+s2 + s3_warp_bayes + s4 + s5
-    t_s12 = t_total - t_s3 - t_s4 - t_s5
+    # timing_total_ms = s1+s2 + s3_warp_bayes + s4
+    t_s12 = t_total - t_s3 - t_s4
 
     timings = {
         'timing_s12_ms': max(0, t_s12),
         'timing_stage3_ms': t_s3,
         'timing_stage4_ms': t_s4,
-        'timing_stage5_ms': t_s5,
         'timing_total_ms': t_total,
     }
 
@@ -268,10 +241,10 @@ def test_sequence(seq, scan_start, n_frames, include_hcd_ablation=False):
     print(f"\n{'='*90}")
     print(f"TIMING (último frame) - SECUENCIA {seq}")
     print(f"{'='*90}")
-    print(f"\n{'Config':<28} {'S1+S2':>8} {'S3':>8} {'S4':>8} {'S5':>8} {'Total':>8}")
-    print("-" * 76)
+    print(f"\n{'Config':<28} {'S1+S2':>8} {'S3':>8} {'S4':>8} {'Total':>8}")
+    print("-" * 68)
     for name, t in all_timings.items():
-        print(f"{name:<28} {t['timing_s12_ms']:>7.0f}ms {t['timing_stage3_ms']:>7.0f}ms {t['timing_stage4_ms']:>7.0f}ms {t['timing_stage5_ms']:>7.0f}ms {t['timing_total_ms']:>7.0f}ms")
+        print(f"{name:<28} {t['timing_s12_ms']:>7.0f}ms {t['timing_stage3_ms']:>7.0f}ms {t['timing_stage4_ms']:>7.0f}ms {t['timing_total_ms']:>7.0f}ms")
 
     # ========================================
     # CONTRIBUCIÓN DE CADA STAGE
@@ -296,37 +269,17 @@ def test_sequence(seq, scan_start, n_frames, include_hcd_ablation=False):
     if 'Stage 2→3' in all_metrics and 'Stage 2→3→4' in all_metrics:
         m_s3 = all_metrics['Stage 2→3']
         m_s4 = all_metrics['Stage 2→3→4']
-        print(f"\n  Stage 4 (Shadow Validation):")
+        print(f"\n  Stage 4 (DBSCAN Cluster Filtering):")
         print(f"    F1:        {100*(m_s4['f1']-m_s3['f1']):+.2f}%")
         print(f"    IoU:       {100*(m_s4['iou']-m_s3['iou']):+.2f}%")
         print(f"    Precision: {100*(m_s4['precision']-m_s3['precision']):+.2f}%")
         print(f"    Recall:    {100*(m_s4['recall']-m_s3['recall']):+.2f}%")
         print(f"    FP:        {m_s4['fp']-m_s3['fp']:+d}")
 
-    # Stage 5 contribution: (2→3→4→5) vs (2→3→4)
-    if 'Stage 2→3→4' in all_metrics and 'Stage 2→3→4→5' in all_metrics:
-        m_s4 = all_metrics['Stage 2→3→4']
-        m_s5 = all_metrics['Stage 2→3→4→5']
-        print(f"\n  Stage 5 (DBSCAN Cluster Filtering):")
-        print(f"    F1:        {100*(m_s5['f1']-m_s4['f1']):+.2f}%")
-        print(f"    IoU:       {100*(m_s5['iou']-m_s4['iou']):+.2f}%")
-        print(f"    Precision: {100*(m_s5['precision']-m_s4['precision']):+.2f}%")
-        print(f"    Recall:    {100*(m_s5['recall']-m_s4['recall']):+.2f}%")
-        print(f"    FP:        {m_s5['fp']-m_s4['fp']:+d}")
-
-    # Sin shadow vs con shadow: (2→3→5) vs (2→3→4→5)
-    if 'Stage 2→3→5 (no shadow)' in all_metrics and 'Stage 2→3→4→5' in all_metrics:
-        m_noshadow = all_metrics['Stage 2→3→5 (no shadow)']
-        m_full = all_metrics['Stage 2→3→4→5']
-        print(f"\n  Shadow Validation (¿necesario?):")
-        print(f"    Con shadow:  F1={100*m_full['f1']:.1f}%  IoU={100*m_full['iou']:.1f}%  P={100*m_full['precision']:.1f}%  R={100*m_full['recall']:.1f}%")
-        print(f"    Sin shadow:  F1={100*m_noshadow['f1']:.1f}%  IoU={100*m_noshadow['iou']:.1f}%  P={100*m_noshadow['precision']:.1f}%  R={100*m_noshadow['recall']:.1f}%")
-        print(f"    Diferencia:  F1={100*(m_full['f1']-m_noshadow['f1']):+.2f}%  IoU={100*(m_full['iou']-m_noshadow['iou']):+.2f}%")
-
     # Pipeline completo vs baseline
-    if 'Stage 2 (baseline)' in all_metrics and 'Stage 2→3→4→5' in all_metrics:
+    if 'Stage 2 (baseline)' in all_metrics and 'Stage 2→3→4' in all_metrics:
         m_base = all_metrics['Stage 2 (baseline)']
-        m_full = all_metrics['Stage 2→3→4→5']
+        m_full = all_metrics['Stage 2→3→4']
         print(f"\n  TOTAL (Pipeline completo vs Stage 2 solo):")
         print(f"    F1:        {100*(m_full['f1']-m_base['f1']):+.2f}%")
         print(f"    IoU:       {100*(m_full['iou']-m_base['iou']):+.2f}%")
@@ -346,10 +299,10 @@ def test_sequence(seq, scan_start, n_frames, include_hcd_ablation=False):
         print(f"    Sin HCD:   F1={100*m_nohcd['f1']:.1f}%  IoU={100*m_nohcd['iou']:.1f}%  P={100*m_nohcd['precision']:.1f}%  R={100*m_nohcd['recall']:.1f}%  FP={m_nohcd['fp']}")
         print(f"    Delta:     F1={100*(m_hcd['f1']-m_nohcd['f1']):+.2f}%  IoU={100*(m_hcd['iou']-m_nohcd['iou']):+.2f}%  FP={m_hcd['fp']-m_nohcd['fp']:+d}")
 
-    if 'Stage 2→3→4→5 (sin HCD)' in all_metrics and 'Stage 2→3→4→5' in all_metrics:
-        m_full_hcd = all_metrics['Stage 2→3→4→5']
-        m_full_nohcd = all_metrics['Stage 2→3→4→5 (sin HCD)']
-        print(f"\n  Pipeline completo (Stage 2→3→4→5):")
+    if 'Stage 2→3→4 (sin HCD)' in all_metrics and 'Stage 2→3→4' in all_metrics:
+        m_full_hcd = all_metrics['Stage 2→3→4']
+        m_full_nohcd = all_metrics['Stage 2→3→4 (sin HCD)']
+        print(f"\n  Pipeline completo (Stage 2→3→4):")
         print(f"    Con HCD:   F1={100*m_full_hcd['f1']:.1f}%  IoU={100*m_full_hcd['iou']:.1f}%  P={100*m_full_hcd['precision']:.1f}%  R={100*m_full_hcd['recall']:.1f}%  FP={m_full_hcd['fp']}")
         print(f"    Sin HCD:   F1={100*m_full_nohcd['f1']:.1f}%  IoU={100*m_full_nohcd['iou']:.1f}%  P={100*m_full_nohcd['precision']:.1f}%  R={100*m_full_nohcd['recall']:.1f}%  FP={m_full_nohcd['fp']}")
         print(f"    Delta:     F1={100*(m_full_hcd['f1']-m_full_nohcd['f1']):+.2f}%  IoU={100*(m_full_hcd['iou']-m_full_nohcd['iou']):+.2f}%  FP={m_full_hcd['fp']-m_full_nohcd['fp']:+d}")

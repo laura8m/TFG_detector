@@ -36,8 +36,7 @@ class PipelineConfig:
     - Stage 1: Segmentación de suelo (Patchwork++) + HCD
     - Stage 2: Detección de anomalías delta-r
     - Stage 3: Filtro temporal Bayesiano
-    - Stage 4: Validación por sombra geométrica
-    - Stage 5: Filtrado por clustering DBSCAN
+    - Stage 4: Filtrado por clustering DBSCAN
     """
 
     # ========================================
@@ -101,25 +100,10 @@ class PipelineConfig:
     depth_jump_threshold: float = 2.0  # Umbral depth jump check (m)
 
     # ========================================
-    # STAGE 4: Validación por sombra (Per-Point 3D)
+    # STAGE 4: Filtrado por clustering DBSCAN
     # ========================================
 
-    enable_shadow_validation: bool = True  # Activar/desactivar Stage 4
-    shadow_ground_min_count: int = 3  # Ground points detrás mínimos → oclusión parcial
-    shadow_boost_val: float = 1.0  # Boost log-odds: oclusión completa (void detrás = sólido)
-    shadow_suppress_val: float = -1.0  # Suppress log-odds: oclusión parcial (ground detrás = FP)
-    shadow_decay_dist: float = 60.0  # Distancia de decaimiento exponencial (m)
-    shadow_min_decay: float = 0.2  # Factor mínimo de decaimiento a distancia máxima
-    shadow_min_range: float = 3.0  # Ignorar obstáculos muy cercanos (m)
-    shadow_max_range: float = 70.0  # Ignorar obstáculos muy lejanos (m)
-    shadow_sensor_height: float = 1.73  # Altura sensor sobre ground (m)
-    shadow_max_length: float = 50.0  # Longitud máxima de sombra geométrica (m)
-
-    # ========================================
-    # STAGE 5: Filtrado por clustering DBSCAN
-    # ========================================
-
-    enable_cluster_filtering: bool = True  # Activar/desactivar Stage 5
+    enable_cluster_filtering: bool = True  # Activar/desactivar Stage 4
     cluster_eps: float = 0.5  # DBSCAN epsilon (m) - distancia máxima entre puntos del mismo cluster
     cluster_min_samples: int = 5  # DBSCAN min_samples - densidad mínima para core point
     cluster_min_pts: int = 15  # Puntos mínimos por cluster para ser considerado obstáculo real
@@ -139,12 +123,11 @@ class LidarPipelineSuite:
     """
     Suite modular de procesamiento LiDAR 3D para detección de obstáculos.
 
-    Implementa un pipeline secuencial de 5 etapas con estado compartido:
+    Implementa un pipeline secuencial de 4 etapas con estado compartido:
       1. Segmentación de suelo (Patchwork++ + rechazo de paredes + HCD)
       2. Detección de anomalías delta-r con fusión HCD opcional
       3. Filtro temporal Bayesiano per-point con asociación por KDTree
-      4. Validación por sombra geométrica 3D (oclusión completa vs parcial)
-      5. Filtrado por clustering DBSCAN (elimina ruido disperso)
+      4. Filtrado por clustering DBSCAN (elimina ruido disperso)
 
     Cada etapa puede activarse/desactivarse mediante PipelineConfig para
     facilitar ablation studies. El estado temporal (belief, puntos previos)
@@ -188,7 +171,6 @@ class LidarPipelineSuite:
             print("[INFO] LidarPipelineSuite inicializado")
             print(f"  - Rechazo de paredes: {'SI' if config.enable_hybrid_wall_rejection else 'NO'}")
             print(f"  - HCD (ERASOR++): {'SI' if config.enable_hcd else 'NO'}")
-            print(f"  - Validación por sombra: {'SI' if config.enable_shadow_validation else 'NO'}")
             print(f"  - Filtrado por clustering: {'SI' if config.enable_cluster_filtering else 'NO'}")
 
     # ========================================
@@ -502,7 +484,7 @@ class LidarPipelineSuite:
 
                     # Búsqueda vectorizada de vecinos en radio fijo
                     suspect_pts = ground_pts[suspect_indices]
-                    neighbor_lists = tree.query_ball_point(suspect_pts, r=kdtree_radius)
+                    neighbor_lists = tree.query_ball_point(suspect_pts, r=kdtree_radius, workers=-1)
 
                     # Analizar delta_z de cada vecindad
                     for i, neighbors in enumerate(neighbor_lists):
@@ -1085,7 +1067,7 @@ class LidarPipelineSuite:
         # Buscar punto más cercano (k=1)
         # 2.0m de umbral permite asociar con egomotion ~1.3m/frame (autopista KITTI)
         max_distance = 2.0  # metros
-        distances, indices = tree.query(points_current, k=1, distance_upper_bound=max_distance)
+        distances, indices = tree.query(points_current, k=1, distance_upper_bound=max_distance, workers=-1)
 
         # ========================================
         # 3. HEREDAR BELIEF O RESETEAR
@@ -1262,281 +1244,12 @@ class LidarPipelineSuite:
         }
 
     # ========================================
-    # STAGE 4: VALIDACIÓN POR SOMBRA (Per-Point 3D)
+    # STAGE 4: FILTRADO POR CLUSTERING DBSCAN
     # ========================================
 
-    def stage4_shadow_validation(self, points: np.ndarray, stage3_result: Dict) -> Dict:
+    def stage4_cluster_filtering(self, points: np.ndarray, stage3_result: Dict) -> Dict:
         """
-        Stage 4: Validación de obstáculos por sombra geométrica 3D.
-
-        Principio físico: Un obstáculo sólido (coche, muro) bloquea TODOS los rayos
-        láser en su dirección, creando una zona de "sombra" detrás donde no hay
-        retornos LiDAR (void). En cambio, partículas dispersas en suspensión
-        (polvo, lluvia, humo) permiten que algunos rayos pasen entre ellas y
-        alcancen el ground detrás. La diferencia es oclusión COMPLETA vs PARCIAL.
-
-        Casos de clasificación:
-          1. SÓLIDO (coche, pared): void detrás → BOOST al belief
-          2. PARTÍCULAS (polvo, lluvia): ground visible detrás → SUPPRESS al belief
-          3. OBSTÁCULO CON HUECOS (valla): ground entre barras → SUPPRESS
-
-        Algoritmo:
-        1. Construir KDTree sobre ground points en coordenadas angulares (azimuth, elevación)
-        2. Para cada candidato, buscar ground points en cono angular detrás
-           (mismo azimuth/elevación, mayor rango, dentro de zona de sombra geométrica)
-        3. Clasificar y aplicar boost/suppress con decaimiento por distancia
-
-        Args:
-            points: (N, 3) nube de puntos completa
-            stage3_result: Dict de stage3_per_point con belief, obs_mask, ground_indices
-
-        Returns:
-            Dict actualizado con belief, obs_mask, belief_prob modificados + info de sombra
-        """
-        t_start = time.time()
-
-        cfg = self.config
-        belief = stage3_result['belief'].copy()
-        obs_mask = stage3_result['obs_mask'].copy()
-        ground_indices = stage3_result['ground_indices']
-        N = len(points)
-
-        # Arrays de depuración
-        shadow_score = np.zeros(N, dtype=np.float32)
-        shadow_class = np.zeros(N, dtype=np.int8)  # 0=sin verificar, 1=sólido, 2=transparente, 3=incierto
-
-        if not cfg.enable_shadow_validation:
-            return {
-                **stage3_result,
-                'shadow_score': shadow_score,
-                'shadow_classification': shadow_class,
-                'timing_stage4_ms': 0.0,
-            }
-
-        # ========================================
-        # 1. PREPARAR GROUND POINTS EN COORDENADAS ANGULARES
-        # ========================================
-        t_build = time.time()
-
-        ground_pts = points[ground_indices]
-        if len(ground_pts) < 10:
-            if cfg.verbose:
-                print(f"[Stage 4] Insuficientes ground points ({len(ground_pts)}). Saltar.")
-            return {
-                **stage3_result,
-                'shadow_score': shadow_score,
-                'shadow_classification': shadow_class,
-                'timing_stage4_ms': (time.time() - t_start) * 1000.0,
-            }
-
-        # Coordenadas esféricas del ground
-        ground_r_horiz = np.linalg.norm(ground_pts[:, :2], axis=1)
-        ground_range_3d = np.linalg.norm(ground_pts, axis=1)
-        ground_az = np.arctan2(ground_pts[:, 1], ground_pts[:, 0])  # [-pi, pi]
-        ground_el = np.arctan2(ground_pts[:, 2], ground_r_horiz)    # elevación
-
-        # KDTree en espacio angular (az, el) para búsqueda de cono
-        ground_angular = np.column_stack([ground_az, ground_el])
-        ground_tree = cKDTree(ground_angular)
-
-        t_build_end = time.time()
-
-        # ========================================
-        # 2. SELECCIONAR CANDIDATOS OBSTÁCULO
-        # ========================================
-        candidate_indices = np.where(obs_mask)[0]
-
-        if len(candidate_indices) == 0:
-            if cfg.verbose:
-                print(f"[Stage 4] Sin candidatos obstáculo. Saltar.")
-            return {
-                **stage3_result,
-                'shadow_score': shadow_score,
-                'shadow_classification': shadow_class,
-                'timing_stage4_ms': (time.time() - t_start) * 1000.0,
-            }
-
-        candidate_pts = points[candidate_indices]
-        candidate_ranges = np.linalg.norm(candidate_pts, axis=1)
-        range_valid = (candidate_ranges > cfg.shadow_min_range) & (candidate_ranges < cfg.shadow_max_range)
-        candidate_indices = candidate_indices[range_valid]
-        candidate_pts = candidate_pts[range_valid]
-        candidate_ranges = candidate_ranges[range_valid]
-        n_candidates = len(candidate_indices)
-
-        if n_candidates == 0:
-            if cfg.verbose:
-                print(f"[Stage 4] Sin candidatos en rango válido. Saltar.")
-            return {
-                **stage3_result,
-                'shadow_score': shadow_score,
-                'shadow_classification': shadow_class,
-                'timing_stage4_ms': (time.time() - t_start) * 1000.0,
-            }
-
-        # ========================================
-        # 3. ESTIMAR ALTURA DE OBSTÁCULO Y LONGITUD DE SOMBRA GEOMÉTRICA
-        # ========================================
-        # Un obstáculo de altura h_obs a rango r_obs crea sombra finita:
-        #   L_sombra = r_obs * h_obs / (h_sensor - h_obs)
-        h_sensor = cfg.shadow_sensor_height
-
-        # Estimar altura de cada candidato sobre el ground local
-        ground_z_mean = np.median(ground_pts[:, 2])
-        cand_h_obs = candidate_pts[:, 2] - ground_z_mean
-        cand_h_obs = np.clip(cand_h_obs, 0.05, h_sensor - 0.01)  # Mín 5cm, máx < h_sensor
-
-        # Longitud de sombra geométrica por candidato
-        L_shadow = candidate_ranges * cand_h_obs / (h_sensor - cand_h_obs)
-        L_shadow = np.clip(L_shadow, 1.0, cfg.shadow_max_length)
-
-        # ========================================
-        # 4. BUSCAR GROUND DETRÁS DENTRO DE LA ZONA DE SOMBRA
-        # ========================================
-        t_search = time.time()
-
-        # Coordenadas angulares de candidatos
-        cand_r_horiz = np.linalg.norm(candidate_pts[:, :2], axis=1)
-        cand_az = np.arctan2(candidate_pts[:, 1], candidate_pts[:, 0])
-        cand_el = np.arctan2(candidate_pts[:, 2], cand_r_horiz)
-        cand_angular = np.column_stack([cand_az, cand_el])
-
-        # Radio angular de búsqueda: cono ~2° (0.035 rad)
-        angular_radius = 0.035  # rad (~2 grados)
-
-        # Búsqueda vectorizada de k vecinos más cercanos en espacio angular
-        k_neighbors = min(50, len(ground_range_3d))
-        dists, indices = ground_tree.query(
-            cand_angular, k=k_neighbors,
-            distance_upper_bound=angular_radius
-        )
-
-        # Máscara de vecinos válidos (dentro del radio angular)
-        valid = indices < len(ground_range_3d)  # (C, K) bool
-
-        # Rangos 3D de los vecinos ground
-        safe_indices = np.clip(indices, 0, len(ground_range_3d) - 1)
-        neighbor_ranges = ground_range_3d[safe_indices]  # (C, K)
-
-        # Ground DETRÁS pero DENTRO de la zona de sombra geométrica:
-        #   r_obs + 0.5m < r_ground < r_obs + L_sombra
-        range_min_behind = candidate_ranges[:, np.newaxis] + 0.5  # (C, 1)
-        range_max_behind = candidate_ranges[:, np.newaxis] + L_shadow[:, np.newaxis]  # (C, 1)
-
-        behind_mask = (
-            (neighbor_ranges > range_min_behind) &
-            (neighbor_ranges < range_max_behind) &
-            valid
-        )
-        ground_behind_count = behind_mask.sum(axis=1).astype(np.int32)  # (C,)
-
-        has_angular_neighbors = valid.any(axis=1)  # (C,) bool
-
-        t_search_end = time.time()
-
-        # ========================================
-        # 5. CLASIFICAR: ground detrás → oclusión parcial, void → oclusión completa
-        # ========================================
-        t_classify = time.time()
-
-        # Caso 2/3: OCLUSIÓN PARCIAL - ground visible detrás (partículas dispersas / vallas)
-        is_transparent = ground_behind_count >= cfg.shadow_ground_min_count
-
-        # Caso 1: OCLUSIÓN COMPLETA - void detrás (obstáculo sólido)
-        is_solid = (ground_behind_count == 0) & has_angular_neighbors
-
-        is_uncertain = ~is_solid & ~is_transparent
-
-        # ========================================
-        # 6. APLICAR BOOST/SUPPRESS CON DECAIMIENTO POR DISTANCIA
-        # ========================================
-        # Decaimiento exponencial: más lejos → menos confianza en validación por sombra
-        distance_factor = np.exp(-candidate_ranges / cfg.shadow_decay_dist)
-        distance_factor = cfg.shadow_min_decay + (1.0 - cfg.shadow_min_decay) * distance_factor
-
-        belief_delta = np.zeros(n_candidates, dtype=np.float32)
-        belief_delta[is_solid] = cfg.shadow_boost_val        # Oclusión completa confirmada
-        belief_delta[is_transparent] = cfg.shadow_suppress_val  # Oclusión parcial → probable FP
-        belief_delta *= distance_factor
-
-        belief[candidate_indices] += belief_delta
-        belief = np.clip(belief, cfg.belief_clamp_min, cfg.belief_clamp_max)
-
-        # Recalcular probabilidad y máscara
-        belief_prob = 1.0 / (1.0 + np.exp(-belief))
-        obs_mask_new = belief_prob > cfg.prob_threshold_obs
-
-        # Info de depuración
-        shadow_score[candidate_indices] = ground_behind_count.astype(np.float32) / max(1, cfg.shadow_ground_min_count)
-        shadow_class[candidate_indices[is_solid]] = 1
-        shadow_class[candidate_indices[is_transparent]] = 2
-        shadow_class[candidate_indices[is_uncertain]] = 3
-
-        t_classify_end = time.time()
-
-        # ========================================
-        # 7. MÉTRICAS
-        # ========================================
-        t_end = time.time()
-        timing_ms = (t_end - t_start) * 1000.0
-
-        n_solid = int(is_solid.sum())
-        n_transparent = int(is_transparent.sum())
-        n_uncertain = int(is_uncertain.sum())
-        n_removed = int(obs_mask.sum() - obs_mask_new.sum())
-
-        if cfg.verbose:
-            print(f"[Stage 4 Sombra] {timing_ms:.1f} ms")
-            print(f"  Candidatos: {n_candidates} | Sólidos: {n_solid} | Oclusión parcial (FP): {n_transparent} | Inciertos: {n_uncertain}")
-            print(f"  Obstáculos eliminados: {n_removed} ({100*n_removed/max(obs_mask.sum(),1):.1f}%)")
-            print(f"  Tiempos: build={1000*(t_build_end-t_build):.0f}ms | búsqueda={1000*(t_search_end-t_search):.0f}ms | clasificar={1000*(t_classify_end-t_classify):.0f}ms")
-
-        return {
-            **stage3_result,
-            'belief': belief,
-            'obs_mask': obs_mask_new,
-            'belief_prob': belief_prob,
-            'shadow_score': shadow_score,
-            'shadow_classification': shadow_class,
-            'n_shadow_solid': n_solid,
-            'n_shadow_transparent': n_transparent,
-            'n_shadow_uncertain': n_uncertain,
-            'n_shadow_removed': n_removed,
-            'timing_stage4_ms': timing_ms,
-            'timing_total_ms': stage3_result.get('timing_total_ms', 0) + timing_ms,
-        }
-
-    def stage4_per_point(self, points: np.ndarray, delta_pose: Optional[np.ndarray] = None) -> Dict:
-        """
-        Stage 4 completo: encadena Stage 3 per-point + validación por sombra.
-
-        Ejecuta secuencialmente el filtro Bayesiano temporal y la validación
-        por sombra geométrica, y propaga la corrección de sombra al estado
-        temporal para que se acumule entre frames.
-
-        Args:
-            points: (N, 3) nube de puntos
-            delta_pose: (4, 4) opcional, egomotion t -> t-1
-
-        Returns:
-            Dict con resultados de Stages 1-4
-        """
-        stage3_result = self.stage3_per_point(points, delta_pose=delta_pose)
-        stage4_result = self.stage4_shadow_validation(points, stage3_result)
-
-        # Actualizar belief_prev con la corrección de sombra para que
-        # la supresión se propague temporalmente via egomotion
-        self.belief_prev = stage4_result['belief'].copy()
-
-        return stage4_result
-
-    # ========================================
-    # STAGE 5: FILTRADO POR CLUSTERING DBSCAN
-    # ========================================
-
-    def stage5_cluster_filtering(self, points: np.ndarray, stage4_result: Dict) -> Dict:
-        """
-        Stage 5: Filtrado de obstáculos por clustering DBSCAN.
+        Stage 4: Filtrado de obstáculos por clustering DBSCAN.
 
         Los obstáculos reales (coches, edificios, personas) forman clusters densos
         en el espacio 3D. Los falsos positivos (ground ambiguo, ruido temporal)
@@ -1548,7 +1261,7 @@ class LidarPipelineSuite:
 
         Args:
             points: (N, 3) nube de puntos completa
-            stage4_result: Dict de stage4 con obs_mask, belief, etc.
+            stage3_result: Dict de stage3 con obs_mask, belief, etc.
 
         Returns:
             Dict actualizado con obs_mask filtrado + info de clusters
@@ -1556,17 +1269,17 @@ class LidarPipelineSuite:
         t_start = time.time()
 
         cfg = self.config
-        obs_mask = stage4_result['obs_mask'].copy()
-        belief = stage4_result['belief'].copy()
+        obs_mask = stage3_result['obs_mask'].copy()
+        belief = stage3_result['belief'].copy()
         N = len(points)
 
         if not cfg.enable_cluster_filtering:
             return {
-                **stage4_result,
+                **stage3_result,
                 'cluster_labels': np.full(N, -1, dtype=np.int32),
                 'n_clusters': 0,
                 'n_noise_removed': 0,
-                'timing_stage5_ms': 0.0,
+                'timing_stage4_ms': 0.0,
             }
 
         # ========================================
@@ -1577,13 +1290,13 @@ class LidarPipelineSuite:
 
         if n_obs == 0:
             if cfg.verbose:
-                print(f"[Stage 5] Sin obstáculos. Saltar.")
+                print(f"[Stage 4] Sin obstáculos. Saltar.")
             return {
-                **stage4_result,
+                **stage3_result,
                 'cluster_labels': np.full(N, -1, dtype=np.int32),
                 'n_clusters': 0,
                 'n_noise_removed': 0,
-                'timing_stage5_ms': (time.time() - t_start) * 1000.0,
+                'timing_stage4_ms': (time.time() - t_start) * 1000.0,
             }
 
         obs_pts = points[obs_indices]  # (M, 3)
@@ -1647,13 +1360,13 @@ class LidarPipelineSuite:
         n_removed = int(obs_mask.sum() - obs_mask_new.sum())
 
         if cfg.verbose:
-            print(f"[Stage 5 DBSCAN] {timing_ms:.1f} ms")
+            print(f"[Stage 4 DBSCAN] {timing_ms:.1f} ms")
             print(f"  Clusters: {n_clusters_total} total | {n_clusters_valid} válidos (>={cfg.cluster_min_pts} pts) | {n_clusters_rejected} rechazados")
             print(f"  Puntos eliminados: {n_removed} ({100*n_removed/max(n_obs,1):.1f}%) — ruido: {n_noise}, clusters pequeños: {n_small_cluster}")
             print(f"  Tiempos: DBSCAN={1000*(t_dbscan_end-t_dbscan):.0f}ms | filtro={1000*(t_filter_end-t_filter):.0f}ms")
 
         return {
-            **stage4_result,
+            **stage3_result,
             'obs_mask': obs_mask_new,
             'cluster_labels': cluster_labels_full,
             'n_clusters': n_clusters_valid,
@@ -1661,23 +1374,23 @@ class LidarPipelineSuite:
             'n_noise_removed': n_noise,
             'n_small_cluster_removed': n_small_cluster,
             'n_cluster_total_removed': n_removed,
-            'timing_stage5_ms': timing_ms,
-            'timing_total_ms': stage4_result.get('timing_total_ms', 0) + timing_ms,
+            'timing_stage4_ms': timing_ms,
+            'timing_total_ms': stage3_result.get('timing_total_ms', 0) + timing_ms,
         }
 
-    def stage5_per_point(self, points: np.ndarray, delta_pose: Optional[np.ndarray] = None) -> Dict:
+    def stage4_per_point(self, points: np.ndarray, delta_pose: Optional[np.ndarray] = None) -> Dict:
         """
-        Stage 5 completo: ejecuta Stages 1-4 + filtrado DBSCAN.
+        Stage 4 completo: ejecuta Stages 1-3 + filtrado DBSCAN.
 
         Args:
             points: (N, 3) nube de puntos
             delta_pose: (4, 4) opcional, egomotion t -> t-1
 
         Returns:
-            Dict con resultados de Stages 1-5
+            Dict con resultados de Stages 1-4
         """
-        stage4_result = self.stage4_per_point(points, delta_pose=delta_pose)
-        return self.stage5_cluster_filtering(points, stage4_result)
+        stage3_result = self.stage3_per_point(points, delta_pose=delta_pose)
+        return self.stage4_cluster_filtering(points, stage3_result)
 
     # ========================================
     # UTILIDADES: EGOMOTION Y POSES

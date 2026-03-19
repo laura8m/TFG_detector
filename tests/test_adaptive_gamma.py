@@ -2,7 +2,7 @@
 """
 Test: Gamma Adaptativo + Warping Quality Check en Stage 3
 
-Compara pipeline completo (Stages 2→3→4→5) con:
+Compara pipeline completo (Stages 2→3→4) con:
 - Config A: gamma fijo 0.7 (actual)
 - Config B: gamma adaptativo + warping quality check (nuevo)
 
@@ -94,7 +94,7 @@ def run_pipeline(seq, scan_start, n_frames, config, pipeline_name, verbose_frame
         delta_pose = None if i == 0 else LidarPipelineSuite.compute_delta_pose(
             poses[scan_start + i - 1], poses[scan_start + i]
         )
-        result = pipeline.stage5_per_point(pts, delta_pose=delta_pose)
+        result = pipeline.stage4_per_point(pts, delta_pose=delta_pose)
 
         if verbose_frames and (i + 1) % 5 == 0:
             ego_speed = result.get('ego_speed', 0)
@@ -143,7 +143,7 @@ def test_sequence(seq, scan_start, n_frames):
     config_fixed = PipelineConfig(
         enable_hybrid_wall_rejection=True,
         enable_hcd=True,
-        enable_shadow_validation=True,
+
         enable_cluster_filtering=True,
         gamma=0.7,
         gamma_min=0.7,  # Desactivar adaptativo: gamma_min = gamma (nunca baja)
@@ -159,7 +159,7 @@ def test_sequence(seq, scan_start, n_frames):
     config_adaptive = PipelineConfig(
         enable_hybrid_wall_rejection=True,
         enable_hcd=True,
-        enable_shadow_validation=True,
+
         enable_cluster_filtering=True,
         gamma=0.7,
         gamma_min=0.0,
@@ -177,7 +177,7 @@ def test_sequence(seq, scan_start, n_frames):
     config_adaptive2 = PipelineConfig(
         enable_hybrid_wall_rejection=True,
         enable_hcd=True,
-        enable_shadow_validation=True,
+
         enable_cluster_filtering=True,
         gamma=0.7,
         gamma_min=0.0,
@@ -195,7 +195,7 @@ def test_sequence(seq, scan_start, n_frames):
     config_adaptive3 = PipelineConfig(
         enable_hybrid_wall_rejection=True,
         enable_hcd=True,
-        enable_shadow_validation=True,
+
         enable_cluster_filtering=True,
         gamma=0.7,
         gamma_min=0.2,

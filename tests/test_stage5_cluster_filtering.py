@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Test Stage 5: DBSCAN Cluster Filtering
+Test Stage 4: DBSCAN Cluster Filtering
 
 Compara en ambas secuencias KITTI (00 y 04):
 - Stage 2 solo (baseline single-frame)
 - Stage 3+ego (temporal con gamma fix)
-- Stage 4 (shadow validation)
-- Stage 5 = Stage 4 + DBSCAN cluster filtering
+- Stage 4 = Stage 3+ego + DBSCAN cluster filtering
 
-Objetivo: Validar que Stage 5 reduce FP (puntos dispersos) manteniendo recall.
+Objetivo: Validar que Stage 4 reduce FP (puntos dispersos) manteniendo recall.
 """
 
 import sys
@@ -150,45 +149,15 @@ def test_sequence(seq: str, scan_start: int, n_frames: int):
     print()
 
     # ========================================
-    # 2. STAGE 4 (Stage 3+ego + Shadow Validation)
+    # 2. STAGE 4 = Stage 3+ego + DBSCAN Cluster Filtering
     # ========================================
     print("-" * 60)
-    print(f"CONFIG 2: Stage 4 = Stage 3+ego + Shadow ({n_frames} frames)")
+    print(f"CONFIG 2: Stage 4 = Stage 3+ego + DBSCAN ({n_frames} frames)")
     print("-" * 60)
 
     pipeline_s4 = LidarPipelineSuite(PipelineConfig(
         enable_hybrid_wall_rejection=True,
         enable_hcd=True,
-        enable_shadow_validation=True,
-        verbose=False
-    ))
-
-    for i in range(n_frames):
-        scan_id = scan_start + i
-        pts, _ = load_kitti_scan(scan_id, seq)
-        delta_pose = None if i == 0 else LidarPipelineSuite.compute_delta_pose(
-            poses[scan_start + i - 1], poses[scan_start + i]
-        )
-        result_s4 = pipeline_s4.stage4_per_point(pts, delta_pose=delta_pose)
-        if (i + 1) % 5 == 0:
-            print(f"  Frame {scan_id}: {result_s4['obs_mask'].sum()} obs")
-
-    metrics_s4 = compute_detection_metrics(gt_mask, result_s4['obs_mask'])
-    print_metrics("Stage 4", metrics_s4, result_s4.get('timing_total_ms'))
-    results['stage4'] = metrics_s4
-    print()
-
-    # ========================================
-    # 3. STAGE 5 = Stage 4 + DBSCAN Cluster Filtering
-    # ========================================
-    print("-" * 60)
-    print(f"CONFIG 3: Stage 5 = Stage 4 + DBSCAN ({n_frames} frames)")
-    print("-" * 60)
-
-    pipeline_s5 = LidarPipelineSuite(PipelineConfig(
-        enable_hybrid_wall_rejection=True,
-        enable_hcd=True,
-        enable_shadow_validation=True,
         enable_cluster_filtering=True,
         cluster_eps=0.5,
         cluster_min_samples=5,
@@ -202,32 +171,31 @@ def test_sequence(seq: str, scan_start: int, n_frames: int):
         delta_pose = None if i == 0 else LidarPipelineSuite.compute_delta_pose(
             poses[scan_start + i - 1], poses[scan_start + i]
         )
-        result_s5 = pipeline_s5.stage5_per_point(pts, delta_pose=delta_pose)
+        result_s4 = pipeline_s4.stage4_per_point(pts, delta_pose=delta_pose)
         if (i + 1) % 5 == 0:
-            n_clusters = result_s5.get('n_clusters', 0)
-            n_removed = result_s5.get('n_cluster_total_removed', 0)
-            print(f"  Frame {scan_id}: {result_s5['obs_mask'].sum()} obs | {n_clusters} clusters | {n_removed} pts removed")
+            n_clusters = result_s4.get('n_clusters', 0)
+            n_removed = result_s4.get('n_cluster_total_removed', 0)
+            print(f"  Frame {scan_id}: {result_s4['obs_mask'].sum()} obs | {n_clusters} clusters | {n_removed} pts removed")
 
-    metrics_s5 = compute_detection_metrics(gt_mask, result_s5['obs_mask'])
-    print_metrics("Stage 5", metrics_s5, result_s5.get('timing_total_ms'))
-    print(f"    Stage 5 timing: {result_s5.get('timing_stage5_ms', 0):.1f} ms")
-    print(f"    Clusters: {result_s5.get('n_clusters', 0)} valid | {result_s5.get('n_clusters_rejected', 0)} rejected")
-    print(f"    Removed: {result_s5.get('n_cluster_total_removed', 0)} pts (noise: {result_s5.get('n_noise_removed', 0)}, small: {result_s5.get('n_small_cluster_removed', 0)})")
-    results['stage5'] = metrics_s5
+    metrics_s4 = compute_detection_metrics(gt_mask, result_s4['obs_mask'])
+    print_metrics("Stage 4", metrics_s4, result_s4.get('timing_total_ms'))
+    print(f"    Stage 4 timing: {result_s4.get('timing_stage4_ms', 0):.1f} ms")
+    print(f"    Clusters: {result_s4.get('n_clusters', 0)} valid | {result_s4.get('n_clusters_rejected', 0)} rejected")
+    print(f"    Removed: {result_s4.get('n_cluster_total_removed', 0)} pts (noise: {result_s4.get('n_noise_removed', 0)}, small: {result_s4.get('n_small_cluster_removed', 0)})")
+    results['stage4'] = metrics_s4
     print()
 
     # ========================================
-    # 4. ABLATION: Stage 5 con diferentes min_pts
+    # 3. ABLATION: Stage 4 con diferentes min_pts
     # ========================================
     print("-" * 60)
-    print(f"ABLATION: Stage 5 variando cluster_min_pts")
+    print(f"ABLATION: Stage 4 variando cluster_min_pts")
     print("-" * 60)
 
     for min_pts in [5, 10, 15, 25, 50]:
         pipeline_abl = LidarPipelineSuite(PipelineConfig(
             enable_hybrid_wall_rejection=True,
             enable_hcd=True,
-            enable_shadow_validation=True,
             enable_cluster_filtering=True,
             cluster_eps=0.5,
             cluster_min_samples=5,
@@ -241,13 +209,13 @@ def test_sequence(seq: str, scan_start: int, n_frames: int):
             delta_pose = None if i == 0 else LidarPipelineSuite.compute_delta_pose(
                 poses[scan_start + i - 1], poses[scan_start + i]
             )
-            result_abl = pipeline_abl.stage5_per_point(pts, delta_pose=delta_pose)
+            result_abl = pipeline_abl.stage4_per_point(pts, delta_pose=delta_pose)
 
         m = compute_detection_metrics(gt_mask, result_abl['obs_mask'])
-        fp_vs_s4 = metrics_s4['fp'] - m['fp']
-        recall_loss = 100 * (metrics_s4['recall'] - m['recall'])
-        print(f"  min_pts={min_pts:>3}: P={100*m['precision']:.1f}% R={100*m['recall']:.1f}% F1={100*m['f1']:.1f}% | FP removed: {fp_vs_s4} | Recall loss: {recall_loss:.2f}%")
-        results[f'stage5_min{min_pts}'] = m
+        fp_vs_s2 = results['stage2']['fp'] - m['fp']
+        recall_loss = 100 * (results['stage2']['recall'] - m['recall'])
+        print(f"  min_pts={min_pts:>3}: P={100*m['precision']:.1f}% R={100*m['recall']:.1f}% F1={100*m['f1']:.1f}% | FP removed: {fp_vs_s2} | Recall loss: {recall_loss:.2f}%")
+        results[f'stage4_min{min_pts}'] = m
 
     print()
 
@@ -260,21 +228,21 @@ def test_sequence(seq: str, scan_start: int, n_frames: int):
     print()
     print(f"{'Config':<25} {'Precision':>10} {'Recall':>10} {'F1':>10} {'FP':>8} {'FN':>8}")
     print("-" * 71)
-    for name in ['stage2', 'stage4', 'stage5']:
+    for name in ['stage2', 'stage4']:
         if name in results:
             m = results[name]
             print(f"{name:<25} {100*m['precision']:>9.2f}% {100*m['recall']:>9.2f}% {100*m['f1']:>9.2f}% {m['fp']:>8} {m['fn']:>8}")
     print()
 
     # Impacto de DBSCAN
-    if 'stage4' in results and 'stage5' in results:
-        fp_reduction = results['stage4']['fp'] - results['stage5']['fp']
-        fp_pct = 100 * fp_reduction / max(results['stage4']['fp'], 1)
-        recall_loss = 100 * (results['stage4']['recall'] - results['stage5']['recall'])
-        precision_gain = 100 * (results['stage5']['precision'] - results['stage4']['precision'])
-        f1_change = 100 * (results['stage5']['f1'] - results['stage4']['f1'])
+    if 'stage2' in results and 'stage4' in results:
+        fp_reduction = results['stage2']['fp'] - results['stage4']['fp']
+        fp_pct = 100 * fp_reduction / max(results['stage2']['fp'], 1)
+        recall_loss = 100 * (results['stage2']['recall'] - results['stage4']['recall'])
+        precision_gain = 100 * (results['stage4']['precision'] - results['stage2']['precision'])
+        f1_change = 100 * (results['stage4']['f1'] - results['stage2']['f1'])
 
-        print(f"  IMPACTO DBSCAN Cluster Filtering (Stage 4 → Stage 5):")
+        print(f"  IMPACTO DBSCAN Cluster Filtering (Stage 2 → Stage 4):")
         print(f"    FP eliminados: {fp_reduction} ({fp_pct:.1f}%)")
         print(f"    Precision:  {precision_gain:+.2f}%")
         print(f"    Recall:     {recall_loss:+.2f}% (negativo = pérdida)")
@@ -289,7 +257,7 @@ def test_sequence(seq: str, scan_start: int, n_frames: int):
 # ========================================
 
 def main():
-    parser = argparse.ArgumentParser(description='Test Stage 5 DBSCAN Cluster Filtering')
+    parser = argparse.ArgumentParser(description='Test Stage 4 DBSCAN Cluster Filtering')
     parser.add_argument('--scan_start', type=int, default=0)
     parser.add_argument('--n_frames', type=int, default=10)
     parser.add_argument('--seq', type=str, default='both', choices=['00', '04', 'both'])
@@ -315,7 +283,6 @@ def main():
             print(f"\n  Secuencia {seq}:")
             print(f"    Stage 2:    F1={100*res['stage2']['f1']:.1f}%  P={100*res['stage2']['precision']:.1f}%  R={100*res['stage2']['recall']:.1f}%")
             print(f"    Stage 4:    F1={100*res['stage4']['f1']:.1f}%  P={100*res['stage4']['precision']:.1f}%  R={100*res['stage4']['recall']:.1f}%")
-            print(f"    Stage 5:    F1={100*res['stage5']['f1']:.1f}%  P={100*res['stage5']['precision']:.1f}%  R={100*res['stage5']['recall']:.1f}%")
 
 
 if __name__ == '__main__':
