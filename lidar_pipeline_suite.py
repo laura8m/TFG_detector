@@ -35,8 +35,7 @@ class PipelineConfig:
     Etapas:
     - Stage 1: Segmentación de suelo (Patchwork++) + HCD
     - Stage 2: Detección de anomalías delta-r
-    - Stage 3: Filtro temporal Bayesiano
-    - Stage 4: Filtrado por clustering DBSCAN
+    - Stage 3: Filtrado por clustering DBSCAN
     """
 
     # ========================================
@@ -84,26 +83,10 @@ class PipelineConfig:
     threshold_void: float = 0.8  # Void/depresión (m)
 
     # ========================================
-    # STAGE 3: Filtro temporal Bayesiano
+    # STAGE 3: Filtrado por clustering DBSCAN
     # ========================================
 
-    gamma: float = 0.7  # Inercia base (0-1): peso del belief previo vs likelihood actual
-    gamma_min: float = 0.0  # Gamma mínimo a alta velocidad (0 = single-frame puro)
-    gamma_speed_threshold: float = 0.8  # Velocidad (m/frame) a partir de la cual gamma baja
-    gamma_speed_scale: float = 2.0  # Velocidad (m/frame) a la que gamma alcanza gamma_min
-    warp_min_association: float = 0.3  # Mínimo % de puntos asociados para confiar en warping
-    l0: float = 0.0  # Prior log-odds (P=0.5)
-    belief_clamp_min: float = -10.0  # Saturación inferior
-    belief_clamp_max: float = 10.0  # Saturación superior
-    prob_threshold_obs: float = 0.35  # Umbral probabilidad obstáculo
-    prob_threshold_gnd: float = 0.4  # Umbral probabilidad ground
-    depth_jump_threshold: float = 2.0  # Umbral depth jump check (m)
-
-    # ========================================
-    # STAGE 4: Filtrado por clustering DBSCAN
-    # ========================================
-
-    enable_cluster_filtering: bool = True  # Activar/desactivar Stage 4
+    enable_cluster_filtering: bool = True  # Activar/desactivar Stage 3
     cluster_eps: float = 0.5  # DBSCAN epsilon (m) - distancia máxima entre puntos del mismo cluster
     cluster_min_samples: int = 5  # DBSCAN min_samples - densidad mínima para core point
     cluster_min_pts: int = 15  # Puntos mínimos por cluster para ser considerado obstáculo real
@@ -123,20 +106,21 @@ class LidarPipelineSuite:
     """
     Suite modular de procesamiento LiDAR 3D para detección de obstáculos.
 
-    Implementa un pipeline secuencial de 4 etapas con estado compartido:
+    Implementa un pipeline secuencial de 3 etapas:
       1. Segmentación de suelo (Patchwork++ + rechazo de paredes + HCD)
       2. Detección de anomalías delta-r con fusión HCD opcional
-      3. Filtro temporal Bayesiano per-point con asociación por KDTree
-      4. Filtrado por clustering DBSCAN (elimina ruido disperso)
+      3. Filtrado por clustering DBSCAN (elimina ruido disperso)
 
     Cada etapa puede activarse/desactivarse mediante PipelineConfig para
-    facilitar ablation studies. El estado temporal (belief, puntos previos)
-    se mantiene entre frames para el filtrado Bayesiano.
+    facilitar ablation studies.
 
     Estado compartido entre etapas:
     - self.local_planes: Planos locales por bin CZM para cálculo de delta-r
     - self.hcd: Height Coding Descriptor por punto ground
-    - self.belief_prev / self.points_prev: Estado temporal del filtro Bayesiano
+
+    Nota: El filtro temporal Bayesiano (Dewan et al.) se eliminó tras ablation
+    study que demostró que no mejora resultados en KITTI (buen tiempo).
+    Ver lidar_pipeline_suite_with_bayes.py para la versión con Bayes.
     """
 
     def __init__(
@@ -159,7 +143,6 @@ class LidarPipelineSuite:
         self.ros_node = ros_node
 
         # === ESTADO COMPARTIDO ===
-        # Stage 1: planos locales y HCD
         self.local_planes = {}  # Dict[(z,r,s)] -> (normal, d)
         self.hcd = None  # Height Coding Descriptor (N_ground,)
 
@@ -840,7 +823,7 @@ class LidarPipelineSuite:
         Returns:
             Dict con:
                 - delta_r: (N,) desviación de rango
-                - likelihood: (N,) log-likelihood para filtro Bayesiano
+                - likelihood: (N,) log-likelihood por punto
                 - obs_mask: (N,) máscara booleana de obstáculos
                 - void_mask: (N,) máscara booleana de voids
                 - ground_mask: (N,) máscara booleana de ground
@@ -891,7 +874,7 @@ class LidarPipelineSuite:
         void_region = delta_r > threshold_void
         ground_region = (~obs_region) & (~void_region)
 
-        # Likelihood base (log-odds para Stage 3)
+        # Likelihood base (log-odds)
         likelihood_base = np.zeros(N, dtype=np.float32)
         likelihood_base[obs_region] = +2.0   # Obstáculo
         likelihood_base[void_region] = +1.5  # Void
@@ -1018,241 +1001,15 @@ class LidarPipelineSuite:
         }
 
     # ========================================
-    # STAGE 3: FILTRO TEMPORAL BAYESIANO
+    # STAGE 3: FILTRADO POR CLUSTERING DBSCAN
     # ========================================
 
-    def warp_belief_per_point(
-        self,
-        points_current: np.ndarray,
-        points_prev: np.ndarray,
-        belief_prev: np.ndarray,
-        delta_pose: Optional[np.ndarray] = None
-    ) -> np.ndarray:
+    def stage3_cluster_filtering(self, points: np.ndarray, stage2_result: Dict) -> Dict:
         """
-        Transfiere el belief del frame anterior al actual usando KDTree.
-
-        Asocia cada punto del frame actual con el punto más cercano del frame
-        anterior (opcionalmente compensando egomotion). Si la distancia es menor
-        que el umbral, hereda el belief; si no, resetea al prior neutral.
-        Incluye depth jump check para invalidar asociaciones donde el rango
-        cambió drásticamente (objeto se fue, ground ocupa su lugar).
-
-        Args:
-            points_current: (N_t, 3) puntos del frame actual
-            points_prev: (N_{t-1}, 3) puntos del frame anterior
-            belief_prev: (N_{t-1},) belief del frame anterior
-            delta_pose: (4, 4) opcional, transformación egomotion t -> t-1
-
-        Returns:
-            belief_warped: (N_t,) belief transferido para cada punto del frame actual
-            association_ratio: proporción de puntos asociados exitosamente
-        """
-        # ========================================
-        # 1. TRANSFORMAR PUNTOS DEL FRAME ANTERIOR AL ACTUAL (si hay egomotion)
-        # ========================================
-        if delta_pose is not None:
-            # delta_pose transforma frame t-1 → frame t
-            points_prev_hom = np.hstack([points_prev, np.ones((len(points_prev), 1))])
-            points_prev_warped_hom = (delta_pose @ points_prev_hom.T).T
-            points_prev_warped = points_prev_warped_hom[:, :3]
-        else:
-            # Sin egomotion: usar puntos directamente
-            points_prev_warped = points_prev
-
-        # ========================================
-        # 2. ASOCIACIÓN POR KDTree: punto actual → punto más cercano del frame anterior
-        # ========================================
-        tree = cKDTree(points_prev_warped)
-
-        # Buscar punto más cercano (k=1)
-        # 2.0m de umbral permite asociar con egomotion ~1.3m/frame (autopista KITTI)
-        max_distance = 2.0  # metros
-        distances, indices = tree.query(points_current, k=1, distance_upper_bound=max_distance, workers=-1)
-
-        # ========================================
-        # 3. HEREDAR BELIEF O RESETEAR
-        # ========================================
-        N_current = len(points_current)
-        belief_warped = np.full(N_current, self.config.l0, dtype=np.float32)
-
-        # Máscara de puntos asociados (distancia < umbral)
-        valid_mask = distances < max_distance
-
-        # Depth jump check: si el rango cambió drásticamente, la asociación
-        # ya no es válida (ej. coche se fue, ground ocupa su lugar)
-        if self.config.depth_jump_threshold > 0 and np.any(valid_mask):
-            r_current = np.sqrt(np.sum(points_current[valid_mask]**2, axis=1))
-            r_prev = np.sqrt(np.sum(points_prev_warped[indices[valid_mask]]**2, axis=1))
-            depth_jump = np.abs(r_current - r_prev) > self.config.depth_jump_threshold
-            # Invalidar asociaciones con salto de profundidad
-            valid_indices = np.where(valid_mask)[0]
-            valid_mask[valid_indices[depth_jump]] = False
-
-        # Heredar belief de puntos asociados
-        belief_warped[valid_mask] = belief_prev[indices[valid_mask]]
-
-        # Puntos sin asociación mantienen l0 (prior neutral)
-        n_associated = valid_mask.sum()
-        association_ratio = n_associated / max(N_current, 1)
-
-        if self.config.verbose:
-            print(f"[Warp Per-Point] {n_associated} / {N_current} puntos asociados ({100*association_ratio:.1f}%)")
-
-        return belief_warped, association_ratio
-
-    def stage3_per_point(self, points: np.ndarray, delta_pose: Optional[np.ndarray] = None) -> Dict:
-        """
-        Stage 3: Filtro temporal Bayesiano per-point sin range image.
-
-        Mantiene un mapa de creencias (belief) por punto que se acumula entre
-        frames usando asociación temporal por KDTree. Cada punto hereda el belief
-        del punto más cercano del frame anterior (compensando egomotion si hay poses),
-        y se actualiza con la likelihood del frame actual según la ecuación de Bayes
-        en log-odds con gamma adaptativo.
-
-        Protecciones contra inestabilidad:
-        - Gamma adaptativo: baja a 0 (single-frame) a alta velocidad del vehículo
-        - Descarte de warping: si pocos puntos se asocian, ignora el estado previo
-        - Depth jump check: resetea belief si el rango cambió drásticamente
-
-        Args:
-            points: (N, 3) nube de puntos del frame actual
-            delta_pose: (4, 4) opcional, transformación egomotion t -> t-1
-
-        Returns:
-            Dict con:
-                - belief: (N,) log-odds belief per-point
-                - obs_mask: (N,) máscara booleana de obstáculos
-                - belief_prob: (N,) probabilidad P(obstáculo) per-point
-                - ego_speed, gamma_effective, warp_association_ratio: métricas
-                - timing_ms: tiempo de ejecución
-        """
-        t_start = time.time()
-
-        # Guardar puntos para próximo frame
-        self.points_current = points
-        N = len(points)
-
-        # ========================================
-        # 1. STAGE 2: Likelihood per-point
-        # ========================================
-        t_stage2_start = time.time()
-        stage2_result = self.stage2_complete(points)
-        self.last_stage2_result = stage2_result  # Guardar para snapshot en visualizador
-        likelihood = stage2_result['likelihood']  # (N,) log-odds
-        t_stage2_end = time.time()
-
-        # ========================================
-        # 2. WARP BELIEF DEL FRAME ANTERIOR (usando KDTree)
-        # ========================================
-        t_warp_start = time.time()
-        association_ratio = 0.0
-        if hasattr(self, 'belief_prev') and hasattr(self, 'points_prev'):
-            belief_warped, association_ratio = self.warp_belief_per_point(
-                points_current=points,
-                points_prev=self.points_prev,
-                belief_prev=self.belief_prev,
-                delta_pose=delta_pose
-            )
-        else:
-            # Primer frame: inicializar con prior neutral
-            belief_warped = np.full(N, self.config.l0, dtype=np.float32)
-        t_warp_end = time.time()
-
-        # ========================================
-        # 3. ACTUALIZACIÓN BAYESIANA con gamma adaptativo
-        # ========================================
-        t_bayes_start = time.time()
-
-        # --- PROTECCIÓN A: Gamma adaptativo por velocidad ---
-        # gamma controla peso del prior: gamma=0.7 → 70% prior, gamma=0 → single-frame
-        # A alta velocidad, el warping es menos fiable → BAJAR gamma hacia 0
-        gamma = self.config.gamma  # base (0.7)
-        ego_speed = 0.0
-
-        if delta_pose is not None:
-            ego_speed = np.linalg.norm(delta_pose[:3, 3])
-
-            if ego_speed > self.config.gamma_speed_threshold:
-                # Interpolar: gamma baja de gamma (0.7) → gamma_min (0.0)
-                t_interp = min(1.0, (ego_speed - self.config.gamma_speed_threshold) /
-                               (self.config.gamma_speed_scale - self.config.gamma_speed_threshold))
-                gamma = self.config.gamma - t_interp * (self.config.gamma - self.config.gamma_min)
-
-        # --- PROTECCIÓN B: Descarte de warping inestable ---
-        # Si muy pocos puntos se asociaron, el warping no es fiable → single-frame
-        if association_ratio < self.config.warp_min_association and association_ratio > 0:
-            gamma = self.config.gamma_min
-
-        # --- Actualización Bayesiana ---
-        # l_t = l_obs + gamma * (l_{t-1} - l0) + l0
-        belief = likelihood + gamma * (belief_warped - self.config.l0) + self.config.l0
-
-        # Saturar para evitar acumulación infinita
-        belief = np.clip(belief, self.config.belief_clamp_min, self.config.belief_clamp_max)
-        t_bayes_end = time.time()
-
-        # ========================================
-        # 4. UMBRAL PARA OBSTÁCULOS
-        # ========================================
-        # Convertir log-odds → probabilidad: P = 1 / (1 + exp(-belief))
-        belief_prob = 1.0 / (1.0 + np.exp(-belief))
-
-        # Umbral ajustado
-        threshold_prob = self.config.prob_threshold_obs  # default 0.35
-        obs_mask = belief_prob > threshold_prob
-
-        # ========================================
-        # 5. GUARDAR ESTADO PARA PRÓXIMO FRAME
-        # ========================================
-        self.belief_prev = belief.copy()
-        self.points_prev = points.copy()
-
-        # ========================================
-        # 6. MÉTRICAS
-        # ========================================
-        n_obs = obs_mask.sum()
-        mean_belief = belief.mean()
-
-        t_end = time.time()
-        timing_ms = (t_end - t_start) * 1000.0
-
-        # Tiempos detallados
-        timing_stage2_ms = (t_stage2_end - t_stage2_start) * 1000.0
-        timing_warp_ms = (t_warp_end - t_warp_start) * 1000.0
-        timing_bayes_ms = (t_bayes_end - t_bayes_start) * 1000.0
-
-        if self.config.verbose:
-            print(f"[Stage 3 Per-Point] {timing_ms:.1f} ms")
-            print(f"  Desglose: Stage2={timing_stage2_ms:.0f}ms | Warp={timing_warp_ms:.0f}ms | Bayes={timing_bayes_ms:.0f}ms")
-            print(f"  Velocidad ego: {ego_speed:.3f} m/frame | gamma: {gamma:.3f} (base: {self.config.gamma}) | asoc: {100*association_ratio:.1f}%")
-            print(f"  Obstáculos (P > {threshold_prob}): {n_obs} / {N} ({100*n_obs/N:.1f}%)")
-            print(f"  Belief medio: {mean_belief:.3f}")
-            print(f"  Rango belief: [{belief.min():.2f}, {belief.max():.2f}]")
-
-        return {
-            **stage2_result,  # Incluir Stage 1+2 (PRIMERO para que no sobrescriba)
-            'belief': belief,
-            'obs_mask': obs_mask,  # Sobrescribir con Stage 3
-            'belief_prob': belief_prob,
-            'ego_speed': ego_speed,
-            'gamma_effective': gamma,
-            'warp_association_ratio': association_ratio,
-            'timing_ms': timing_ms,
-            'timing_stage3_ms': timing_ms,
-            'timing_total_ms': stage2_result['timing_total_ms'] + timing_ms
-        }
-
-    # ========================================
-    # STAGE 4: FILTRADO POR CLUSTERING DBSCAN
-    # ========================================
-
-    def stage4_cluster_filtering(self, points: np.ndarray, stage3_result: Dict) -> Dict:
-        """
-        Stage 4: Filtrado de obstáculos por clustering DBSCAN.
+        Stage 3: Filtrado de obstáculos por clustering DBSCAN.
 
         Los obstáculos reales (coches, edificios, personas) forman clusters densos
-        en el espacio 3D. Los falsos positivos (ground ambiguo, ruido temporal)
+        en el espacio 3D. Los falsos positivos (ground ambiguo, ruido)
         son puntos dispersos sin estructura espacial coherente.
 
         DBSCAN agrupa puntos por densidad espacial:
@@ -1261,7 +1018,7 @@ class LidarPipelineSuite:
 
         Args:
             points: (N, 3) nube de puntos completa
-            stage3_result: Dict de stage3 con obs_mask, belief, etc.
+            stage2_result: Dict de stage2 con obs_mask, likelihood, etc.
 
         Returns:
             Dict actualizado con obs_mask filtrado + info de clusters
@@ -1269,17 +1026,17 @@ class LidarPipelineSuite:
         t_start = time.time()
 
         cfg = self.config
-        obs_mask = stage3_result['obs_mask'].copy()
-        belief = stage3_result['belief'].copy()
+        obs_mask = stage2_result['obs_mask'].copy()
+        likelihood = stage2_result.get('likelihood', np.zeros(len(points))).copy()
         N = len(points)
 
         if not cfg.enable_cluster_filtering:
             return {
-                **stage3_result,
+                **stage2_result,
                 'cluster_labels': np.full(N, -1, dtype=np.int32),
                 'n_clusters': 0,
                 'n_noise_removed': 0,
-                'timing_stage4_ms': 0.0,
+                'timing_stage3_ms': 0.0,
             }
 
         # ========================================
@@ -1290,13 +1047,13 @@ class LidarPipelineSuite:
 
         if n_obs == 0:
             if cfg.verbose:
-                print(f"[Stage 4] Sin obstáculos. Saltar.")
+                print(f"[Stage 3] Sin obstáculos. Saltar.")
             return {
-                **stage3_result,
+                **stage2_result,
                 'cluster_labels': np.full(N, -1, dtype=np.int32),
                 'n_clusters': 0,
                 'n_noise_removed': 0,
-                'timing_stage4_ms': (time.time() - t_start) * 1000.0,
+                'timing_stage3_ms': (time.time() - t_start) * 1000.0,
             }
 
         obs_pts = points[obs_indices]  # (M, 3)
@@ -1360,13 +1117,13 @@ class LidarPipelineSuite:
         n_removed = int(obs_mask.sum() - obs_mask_new.sum())
 
         if cfg.verbose:
-            print(f"[Stage 4 DBSCAN] {timing_ms:.1f} ms")
+            print(f"[Stage 3 DBSCAN] {timing_ms:.1f} ms")
             print(f"  Clusters: {n_clusters_total} total | {n_clusters_valid} válidos (>={cfg.cluster_min_pts} pts) | {n_clusters_rejected} rechazados")
             print(f"  Puntos eliminados: {n_removed} ({100*n_removed/max(n_obs,1):.1f}%) — ruido: {n_noise}, clusters pequeños: {n_small_cluster}")
             print(f"  Tiempos: DBSCAN={1000*(t_dbscan_end-t_dbscan):.0f}ms | filtro={1000*(t_filter_end-t_filter):.0f}ms")
 
         return {
-            **stage3_result,
+            **stage2_result,
             'obs_mask': obs_mask_new,
             'cluster_labels': cluster_labels_full,
             'n_clusters': n_clusters_valid,
@@ -1374,23 +1131,22 @@ class LidarPipelineSuite:
             'n_noise_removed': n_noise,
             'n_small_cluster_removed': n_small_cluster,
             'n_cluster_total_removed': n_removed,
-            'timing_stage4_ms': timing_ms,
-            'timing_total_ms': stage3_result.get('timing_total_ms', 0) + timing_ms,
+            'timing_stage3_ms': timing_ms,
+            'timing_total_ms': stage2_result.get('timing_total_ms', 0) + timing_ms,
         }
 
-    def stage4_per_point(self, points: np.ndarray, delta_pose: Optional[np.ndarray] = None) -> Dict:
+    def stage3_complete(self, points: np.ndarray) -> Dict:
         """
-        Stage 4 completo: ejecuta Stages 1-3 + filtrado DBSCAN.
+        Pipeline completo: ejecuta Stages 1-2 + filtrado DBSCAN.
 
         Args:
             points: (N, 3) nube de puntos
-            delta_pose: (4, 4) opcional, egomotion t -> t-1
 
         Returns:
-            Dict con resultados de Stages 1-4
+            Dict con resultados de Stages 1-3
         """
-        stage3_result = self.stage3_per_point(points, delta_pose=delta_pose)
-        return self.stage4_cluster_filtering(points, stage3_result)
+        stage2_result = self.stage2_complete(points)
+        return self.stage3_cluster_filtering(points, stage2_result)
 
     # ========================================
     # UTILIDADES: EGOMOTION Y POSES
