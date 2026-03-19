@@ -1,0 +1,497 @@
+{
+  "00": {
+    "stage1": {
+      "n_points": 124668,
+      "gt_ground": 67873,
+      "gt_obstacle": 54607,
+      "pw_ground": 72599,
+      "pw_nonground": 52069,
+      "n_misclassified": 4689,
+      "misclass_pct": 8.586811214679436,
+      "ground_precision": 93.01230044490971,
+      "misclass_by_type": {
+        "vegetation": {
+          "count": 3784,
+          "total": 27123,
+          "pct": 13.951259079010434
+        },
+        "building": {
+          "count": 509,
+          "total": 18268,
+          "pct": 2.7862929713159623
+        },
+        "car": {
+          "count": 169,
+          "total": 4234,
+          "pct": 3.9914974019839393
+        },
+        "other-object": {
+          "count": 76,
+          "total": 1227,
+          "pct": 6.193969030154849
+        },
+        "fence": {
+          "count": 74,
+          "total": 370,
+          "pct": 20.0
+        },
+        "other-structure": {
+          "count": 30,
+          "total": 1471,
+          "pct": 2.0394289598912305
+        },
+        "trunk": {
+          "count": 24,
+          "total": 1192,
+          "pct": 2.0134228187919465
+        },
+        "pole": {
+          "count": 20,
+          "total": 532,
+          "pct": 3.7593984962406015
+        },
+        "moving-motorcyclist": {
+          "count": 3,
+          "total": 88,
+          "pct": 3.409090909090909
+        }
+      },
+      "czm_analysis": {
+        "Z0": {
+          "total": 31,
+          "vertical": 0,
+          "pct": 0.0
+        },
+        "Z1": {
+          "total": 102,
+          "vertical": 18,
+          "pct": 17.647058823529413
+        },
+        "Z2": {
+          "total": 113,
+          "vertical": 12,
+          "pct": 10.619469026548673
+        },
+        "Z3": {
+          "total": 28,
+          "vertical": 5,
+          "pct": 17.857142857142858
+        }
+      },
+      "base_analysis": {
+        "building": {
+          "n_as_ground": 509,
+          "n_total": 18268,
+          "pct": 2.7862929713159623,
+          "position": "BASE",
+          "relative_pct": 22.63270914554596,
+          "z_range": [
+            -1.8347023725509644,
+            1.2027993202209473
+          ],
+          "r_mean": 19.20868492126465,
+          "in_z0": 1,
+          "in_z123": 508
+        },
+        "fence": {
+          "n_as_ground": 74,
+          "n_total": 370,
+          "pct": 20.0,
+          "position": "BASE",
+          "relative_pct": 16.417694091796875,
+          "z_range": [
+            -1.8955923318862915,
+            -1.602232813835144
+          ],
+          "r_mean": 21.87351417541504,
+          "in_z0": 0,
+          "in_z123": 74
+        },
+        "vegetation": {
+          "n_as_ground": 3784,
+          "n_total": 27123,
+          "pct": 13.951259079010434,
+          "position": "BASE",
+          "relative_pct": 28.43751609325409,
+          "z_range": [
+            -2.8201963901519775,
+            0.48845651745796204
+          ],
+          "r_mean": 12.206975936889648,
+          "in_z0": 1752,
+          "in_z123": 2032
+        },
+        "car": {
+          "n_as_ground": 169,
+          "n_total": 4234,
+          "pct": 3.9914974019839393,
+          "position": "BASE",
+          "relative_pct": 25.52296817302704,
+          "z_range": [
+            -2.605199098587036,
+            -0.5190838575363159
+          ],
+          "r_mean": 16.0565185546875,
+          "in_z0": 77,
+          "in_z123": 92
+        },
+        "pole": {
+          "n_as_ground": 20,
+          "n_total": 532,
+          "pct": 3.7593984962406015,
+          "position": "BASE",
+          "relative_pct": 10.630840808153152,
+          "z_range": [
+            -1.8232300281524658,
+            0.14922839403152466
+          ],
+          "r_mean": 13.198702812194824,
+          "in_z0": 12,
+          "in_z123": 8
+        },
+        "trunk": {
+          "n_as_ground": 24,
+          "n_total": 1192,
+          "pct": 2.0134228187919465,
+          "position": "BASE",
+          "relative_pct": 19.43499594926834,
+          "z_range": [
+            -2.0725080966949463,
+            -0.14853805303573608
+          ],
+          "r_mean": 35.21488952636719,
+          "in_z0": 0,
+          "in_z123": 24
+        },
+        "other-structure": {
+          "n_as_ground": 30,
+          "n_total": 1471,
+          "pct": 2.0394289598912305,
+          "position": "BASE",
+          "relative_pct": 3.1882602721452713,
+          "z_range": [
+            -1.584458827972412,
+            -1.3629196882247925
+          ],
+          "r_mean": 17.73973846435547,
+          "in_z0": 0,
+          "in_z123": 30
+        },
+        "other-object": {
+          "n_as_ground": 76,
+          "n_total": 1227,
+          "pct": 6.193969030154849,
+          "position": "MEDIO",
+          "relative_pct": 35.84701716899872,
+          "z_range": [
+            -2.3965206146240234,
+            -1.450913429260254
+          ],
+          "r_mean": 18.624160766601562,
+          "in_z0": 25,
+          "in_z123": 51
+        }
+      },
+      "critical_miss": 172,
+      "critical_detail": {
+        "car": 169,
+        "moving-motorcyclist": 3
+      }
+    },
+    "stage2": {
+      "n_obstacles_detected": 49020,
+      "gt_obstacles": 54607,
+      "metrics": {
+        "precision": 0.9310689514483884,
+        "recall": 0.83580859596755,
+        "f1": 0.8808708155210515,
+        "tp": 45641,
+        "fp": 3379,
+        "fn": 8966
+      },
+      "timing_ms": 3375.000238418579,
+      "stage1_ground": 73438,
+      "stage1_misclass": 5462,
+      "stage1_misclass_pct": 10.002380647169776
+    },
+    "stage3": {
+      "sin_egomotion": {
+        "n_obstacles_detected": 51935,
+        "metrics": {
+          "precision": 0.9320689323192453,
+          "recall": 0.7677679265333313,
+          "f1": 0.8419780143324289,
+          "tp": 48407,
+          "fp": 3528,
+          "fn": 14642
+        },
+        "timing_avg_ms": 5584.277009963989,
+        "timing_total_ms": 55842.77009963989
+      },
+      "con_egomotion": {
+        "n_obstacles_detected": 78360,
+        "metrics": {
+          "precision": 0.7659392547217968,
+          "recall": 0.9519421402401307,
+          "f1": 0.8488710053815528,
+          "tp": 60019,
+          "fp": 18341,
+          "fn": 3030
+        },
+        "timing_avg_ms": 6221.952033042908,
+        "timing_total_ms": 62219.52033042908
+      }
+    }
+  },
+  "04": {
+    "stage1": {
+      "n_points": 124231,
+      "gt_ground": 89995,
+      "gt_obstacle": 29764,
+      "pw_ground": 90869,
+      "pw_nonground": 33362,
+      "n_misclassified": 1935,
+      "misclass_pct": 6.501142319580701,
+      "ground_precision": 97.23007846460288,
+      "misclass_by_type": {
+        "vegetation": {
+          "count": 915,
+          "total": 14107,
+          "pct": 6.486141631813993
+        },
+        "fence": {
+          "count": 413,
+          "total": 2407,
+          "pct": 17.15828832571666
+        },
+        "building": {
+          "count": 225,
+          "total": 2277,
+          "pct": 9.881422924901186
+        },
+        "other-object": {
+          "count": 209,
+          "total": 5370,
+          "pct": 3.891992551210428
+        },
+        "bus": {
+          "count": 70,
+          "total": 2076,
+          "pct": 3.371868978805395
+        },
+        "car": {
+          "count": 33,
+          "total": 1209,
+          "pct": 2.729528535980149
+        },
+        "pole": {
+          "count": 29,
+          "total": 778,
+          "pct": 3.7275064267352187
+        },
+        "moving-car": {
+          "count": 26,
+          "total": 840,
+          "pct": 3.0952380952380953
+        },
+        "trunk": {
+          "count": 12,
+          "total": 358,
+          "pct": 3.35195530726257
+        },
+        "moving-person": {
+          "count": 3,
+          "total": 28,
+          "pct": 10.714285714285714
+        }
+      },
+      "czm_analysis": {
+        "Z0": {
+          "total": 29,
+          "vertical": 0,
+          "pct": 0.0
+        },
+        "Z1": {
+          "total": 129,
+          "vertical": 1,
+          "pct": 0.7751937984496124
+        },
+        "Z2": {
+          "total": 219,
+          "vertical": 11,
+          "pct": 5.0228310502283104
+        },
+        "Z3": {
+          "total": 37,
+          "vertical": 6,
+          "pct": 16.216216216216218
+        }
+      },
+      "base_analysis": {
+        "building": {
+          "n_as_ground": 225,
+          "n_total": 2277,
+          "pct": 9.881422924901186,
+          "position": "MEDIO",
+          "relative_pct": 30.853670835494995,
+          "z_range": [
+            -1.4259041547775269,
+            1.3352382183074951
+          ],
+          "r_mean": 31.222030639648438,
+          "in_z0": 0,
+          "in_z123": 225
+        },
+        "fence": {
+          "n_as_ground": 413,
+          "n_total": 2407,
+          "pct": 17.15828832571666,
+          "position": "BASE",
+          "relative_pct": 25.29774010181427,
+          "z_range": [
+            -2.1619393825531006,
+            0.1537785530090332
+          ],
+          "r_mean": 26.66506576538086,
+          "in_z0": 0,
+          "in_z123": 413
+        },
+        "vegetation": {
+          "n_as_ground": 915,
+          "n_total": 14107,
+          "pct": 6.486141631813993,
+          "position": "MEDIO",
+          "relative_pct": 36.979249119758606,
+          "z_range": [
+            -3.611001968383789,
+            1.7986150979995728
+          ],
+          "r_mean": 34.46390151977539,
+          "in_z0": 1,
+          "in_z123": 914
+        },
+        "car": {
+          "n_as_ground": 33,
+          "n_total": 1209,
+          "pct": 2.729528535980149,
+          "position": "MEDIO",
+          "relative_pct": 35.805544257164,
+          "z_range": [
+            -2.081899404525757,
+            -0.2771230936050415
+          ],
+          "r_mean": 27.910316467285156,
+          "in_z0": 0,
+          "in_z123": 33
+        },
+        "pole": {
+          "n_as_ground": 29,
+          "n_total": 778,
+          "pct": 3.7275064267352187,
+          "position": "MEDIO",
+          "relative_pct": 31.294944882392883,
+          "z_range": [
+            -2.535560369491577,
+            -0.7290874123573303
+          ],
+          "r_mean": 20.186893463134766,
+          "in_z0": 14,
+          "in_z123": 15
+        },
+        "trunk": {
+          "n_as_ground": 12,
+          "n_total": 358,
+          "pct": 3.35195530726257,
+          "position": "MEDIO",
+          "relative_pct": 37.097278237342834,
+          "z_range": [
+            -2.1834847927093506,
+            -0.7464123964309692
+          ],
+          "r_mean": 36.75142288208008,
+          "in_z0": 0,
+          "in_z123": 12
+        },
+        "other-object": {
+          "n_as_ground": 209,
+          "n_total": 5370,
+          "pct": 3.891992551210428,
+          "position": "MEDIO",
+          "relative_pct": 36.8221789598465,
+          "z_range": [
+            -1.6676361560821533,
+            -0.2642185688018799
+          ],
+          "r_mean": 18.630186080932617,
+          "in_z0": 4,
+          "in_z123": 205
+        },
+        "bus": {
+          "n_as_ground": 70,
+          "n_total": 2076,
+          "pct": 3.371868978805395,
+          "position": "BASE",
+          "relative_pct": 11.615902185440063,
+          "z_range": [
+            -2.2588634490966797,
+            -1.585060954093933
+          ],
+          "r_mean": 19.637718200683594,
+          "in_z0": 0,
+          "in_z123": 70
+        }
+      },
+      "critical_miss": 132,
+      "critical_detail": {
+        "bus": 70,
+        "car": 33,
+        "moving-car": 26,
+        "moving-person": 3
+      }
+    },
+    "stage2": {
+      "n_obstacles_detected": 35201,
+      "gt_obstacles": 29764,
+      "metrics": {
+        "precision": 0.782278912530894,
+        "recall": 0.9251780674640505,
+        "f1": 0.8477487878088201,
+        "tp": 27537,
+        "fp": 7664,
+        "fn": 2227
+      },
+      "timing_ms": 3522.270441055298,
+      "stage1_ground": 92063,
+      "stage1_misclass": 2566,
+      "stage1_misclass_pct": 8.621153070823814
+    },
+    "stage3": {
+      "sin_egomotion": {
+        "n_obstacles_detected": 31132,
+        "metrics": {
+          "precision": 0.7405884620326352,
+          "recall": 0.7379573024357456,
+          "f1": 0.7392705410821643,
+          "tp": 23056,
+          "fp": 8076,
+          "fn": 8187
+        },
+        "timing_avg_ms": 5313.390874862671,
+        "timing_total_ms": 53133.90874862671
+      },
+      "con_egomotion": {
+        "n_obstacles_detected": 55482,
+        "metrics": {
+          "precision": 0.5553873328286651,
+          "recall": 0.9862689242390296,
+          "f1": 0.7106140098010955,
+          "tp": 30814,
+          "fp": 24668,
+          "fn": 429
+        },
+        "timing_avg_ms": 5754.129600524902,
+        "timing_total_ms": 57541.29600524902
+      }
+    }
+  }
+}

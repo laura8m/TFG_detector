@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+
+# Datos pesados
+data_kitti/
+
+# Debug
+debug_output/
+
+# ROS / RViz
+*.rviz
+
+# Otros
+*.log
