@@ -1,26 +1,32 @@
 #!/usr/bin/env python3
 """
-Grid Search de parámetros delta-r + DBSCAN (Stages 2-3).
+Grid Search PARALELO de parámetros delta-r + DBSCAN (Stages 2-3).
 
-OPTIMIZACIÓN: Precomputa Stage 1 (Patchwork++ + wall rejection) y el delta_r continuo
-una sola vez. Luego replaya:
-  - Reclasificación con distintos threshold_obs / threshold_void (instantáneo, solo máscaras)
-  - DBSCAN con distintos eps / min_samples / min_pts (solo sobre puntos obstáculo)
+Diseñado para servidor multi-core (ej: AMD EPYC 7763 128C/256T).
 
-Parámetros explorados:
-  Stage 2 (delta-r):
-    - threshold_obs:  umbral negativo para clasificar obstáculo
-    - threshold_void: umbral positivo para clasificar void (también obstáculo)
-  Stage 3 (DBSCAN):
-    - cluster_eps:         distancia máxima entre puntos del mismo cluster
-    - cluster_min_samples: densidad mínima para core point
-    - cluster_min_pts:     puntos mínimos por cluster válido
+Auto-descubre TODAS las secuencias SemanticKITTI disponibles (00-10) y usa
+TODOS los frames que tengan tanto .bin como .label.
+
+OPTIMIZACIÓN:
+  1. Precomputa Stage 1 (Patchwork++) + delta_r continuo una sola vez (secuencial)
+  2. Paraleliza la evaluación de combos con multiprocessing.Pool
+  3. DBSCAN con voxel downsampling para reducir puntos
 
 Uso:
-    python3 tests/test_delta_r_dbscan_grid_search.py --seq both --n_frames 10
-    python3 tests/test_delta_r_dbscan_grid_search.py --seq 04 --mode delta_r --top 20
-    python3 tests/test_delta_r_dbscan_grid_search.py --seq both --mode dbscan --top 15
-    python3 tests/test_delta_r_dbscan_grid_search.py --seq both --mode full --top 10
+    # Todas las secuencias, todos los frames, todos los cores
+    python3 tests/test_delta_r_dbscan_grid_search.py --mode full
+
+    # Submuestrear 1 de cada 5 frames para ir más rápido
+    python3 tests/test_delta_r_dbscan_grid_search.py --mode full --stride 5
+
+    # Solo delta-r (instantáneo, no necesita paralelizar)
+    python3 tests/test_delta_r_dbscan_grid_search.py --mode delta_r
+
+    # Controlar workers
+    python3 tests/test_delta_r_dbscan_grid_search.py --mode full --workers 64
+
+    # Solo algunas secuencias
+    python3 tests/test_delta_r_dbscan_grid_search.py --seq 00 04 05
 """
 
 import sys
@@ -29,12 +35,40 @@ from pathlib import Path
 import argparse
 import time
 from itertools import product
+from multiprocessing import Pool, cpu_count
 from sklearn.cluster import DBSCAN
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lidar_pipeline_suite import LidarPipelineSuite, PipelineConfig
-from data_paths import get_sequence_info, get_scan_file, get_label_file
+from data_paths import (get_scan_file, get_label_file, get_velodyne_dir,
+                        get_labels_dir, VELODYNE_ROOT, LABELS_ROOT)
+
+
+# ========================================
+# AUTO-DESCUBRIMIENTO DE DATOS
+# ========================================
+
+def discover_sequences():
+    """Encuentra secuencias que tienen tanto velodyne como labels."""
+    if not VELODYNE_ROOT.exists() or not LABELS_ROOT.exists():
+        return []
+    vel_seqs = {d.name for d in VELODYNE_ROOT.iterdir() if d.is_dir()}
+    lab_seqs = {d.name for d in LABELS_ROOT.iterdir() if d.is_dir()}
+    seqs = sorted(vel_seqs & lab_seqs)
+    return seqs
+
+
+def discover_scan_ids(seq, stride=1):
+    """Encuentra scan IDs que tienen tanto .bin como .label para una secuencia."""
+    vel_dir = get_velodyne_dir(seq)
+    lab_dir = get_labels_dir(seq)
+    if not vel_dir.exists() or not lab_dir.exists():
+        return []
+    vel_ids = {int(f.stem) for f in vel_dir.glob('*.bin')}
+    lab_ids = {int(f.stem) for f in lab_dir.glob('*.label')}
+    all_ids = sorted(vel_ids & lab_ids)
+    return all_ids[::stride]
 
 
 # ========================================
@@ -53,33 +87,38 @@ def load_kitti_scan(scan_id: int, seq: str):
     return points, semantic_labels
 
 
-def compute_metrics(gt_mask, pred_mask):
-    tp = np.sum(gt_mask & pred_mask)
-    fp = np.sum((~gt_mask) & pred_mask)
-    fn = np.sum(gt_mask & (~pred_mask))
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-    iou = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else 0.0
-    return {'precision': precision, 'recall': recall, 'f1': f1, 'iou': iou,
-            'tp': int(tp), 'fp': int(fp), 'fn': int(fn)}
+OBSTACLE_LABELS = np.array([
+    10, 11, 13, 15, 16, 18, 20,
+    30, 31, 32,
+    50, 51, 52,
+    70, 71,
+    80, 81,
+    99,
+    252, 253, 254, 255, 256, 257, 258, 259
+], dtype=np.uint32)
 
 
 def get_gt_obstacle_mask(semantic_labels):
     """SemanticKITTI obstacle labels (NO 72=terrain, SI 252-259=moving)"""
-    obstacle_labels = [
-        10, 11, 13, 15, 16, 18, 20,
-        30, 31, 32,
-        50, 51, 52,
-        70, 71,
-        80, 81,
-        99,
-        252, 253, 254, 255, 256, 257, 258, 259
-    ]
-    mask = np.zeros(len(semantic_labels), dtype=bool)
-    for label in obstacle_labels:
-        mask |= (semantic_labels == label)
-    return mask
+    return np.isin(semantic_labels, OBSTACLE_LABELS)
+
+
+def compute_metrics_accum(gt_mask, pred_mask):
+    """Retorna tp, fp, fn como enteros para acumulación."""
+    tp = int(np.sum(gt_mask & pred_mask))
+    fp = int(np.sum((~gt_mask) & pred_mask))
+    fn = int(np.sum(gt_mask & (~pred_mask)))
+    return tp, fp, fn
+
+
+def metrics_from_accum(tp, fp, fn):
+    """Calcula precision, recall, f1, iou desde acumulados."""
+    p = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
+    iou = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else 0.0
+    return {'precision': p, 'recall': r, 'f1': f1, 'iou': iou,
+            'tp': tp, 'fp': fp, 'fn': fn}
 
 
 # ========================================
@@ -87,7 +126,6 @@ def get_gt_obstacle_mask(semantic_labels):
 # ========================================
 
 def get_delta_r_grid():
-    """Grid para umbrales delta-r (Stage 2)."""
     return {
         'threshold_obs':  [-0.3, -0.4, -0.5, -0.6, -0.7, -0.8],
         'threshold_void': [0.5, 0.6, 0.8, 1.0, 1.2, 1.5],
@@ -95,7 +133,6 @@ def get_delta_r_grid():
 
 
 def get_dbscan_grid():
-    """Grid para DBSCAN (Stage 3)."""
     return {
         'cluster_eps':         [0.5, 0.6, 0.8, 1.0, 1.2],
         'cluster_min_samples': [3, 5, 8, 12],
@@ -110,15 +147,9 @@ def get_dbscan_grid():
 def precompute_stage1_and_delta_r(seq, scan_ids):
     """
     Ejecuta Stage 1 (Patchwork++) y calcula delta_r continuo para cada frame.
-    También guarda rejected_wall_indices para reclasificación posterior.
-
-    Returns:
-        list of dicts con: points, delta_r, rejected_wall_indices, gt_mask
+    Returns: list of dicts con: points, delta_r, rejected_wall_indices, gt_mask, n_points
     """
-    config = PipelineConfig(
-        enable_cluster_filtering=False,
-        verbose=False,
-    )
+    config = PipelineConfig(enable_cluster_filtering=False, verbose=False)
     pipeline = LidarPipelineSuite(config)
 
     frames = []
@@ -126,10 +157,8 @@ def precompute_stage1_and_delta_r(seq, scan_ids):
         pts, labels = load_kitti_scan(scan_id, seq)
         gt_mask = get_gt_obstacle_mask(labels)
 
-        # Stage 1
         stage1_result = pipeline.stage1_complete(pts)
 
-        # Calcular delta_r continuo (sin clasificar)
         N = len(pts)
         n_per_point = stage1_result['n_per_point']
         d_per_point = stage1_result['d_per_point']
@@ -138,7 +167,6 @@ def precompute_stage1_and_delta_r(seq, scan_ids):
         safe_dot = np.where(dot_prod < -1e-3, dot_prod, -1e-3)
         delta_r = np.clip(r_measured + d_per_point / safe_dot, -20.0, 10.0)
 
-        # Índices de paredes rechazadas
         wall_indices = stage1_result.get('rejected_walls', np.array([], dtype=np.int64))
         if hasattr(wall_indices, '__len__') and len(wall_indices) > 0:
             wall_indices = wall_indices[wall_indices < N]
@@ -157,35 +185,19 @@ def precompute_stage1_and_delta_r(seq, scan_ids):
 
 
 # ========================================
-# REPLAY: RECLASIFICACIÓN DELTA-R
+# REPLAY FUNCTIONS
 # ========================================
 
-def replay_delta_r(frames, threshold_obs, threshold_void):
-    """
-    Reclasifica delta_r con nuevos umbrales. Instantáneo (~0.1ms por frame).
-    Retorna obs_mask por frame.
-    """
-    results = []
-    for fd in frames:
-        delta_r = fd['delta_r']
-        N = fd['n_points']
-        obs_mask = (delta_r < threshold_obs) | (delta_r > threshold_void)
-        # Forzar paredes rechazadas como obstáculos
-        if len(fd['rejected_wall_indices']) > 0:
-            obs_mask[fd['rejected_wall_indices']] = True
-        results.append(obs_mask)
-    return results
+def replay_delta_r_single(frame, threshold_obs, threshold_void):
+    """Reclasifica un frame con nuevos umbrales. Retorna obs_mask."""
+    obs_mask = (frame['delta_r'] < threshold_obs) | (frame['delta_r'] > threshold_void)
+    if len(frame['rejected_wall_indices']) > 0:
+        obs_mask[frame['rejected_wall_indices']] = True
+    return obs_mask
 
-
-# ========================================
-# REPLAY: DBSCAN
-# ========================================
 
 def replay_dbscan(points, obs_mask, eps, min_samples, min_pts):
-    """
-    Ejecuta DBSCAN con voxel downsampling sobre puntos obstáculo.
-    Retorna obs_mask filtrado.
-    """
+    """Ejecuta DBSCAN con voxel downsampling sobre puntos obstáculo."""
     obs_indices = np.where(obs_mask)[0]
     n_obs = len(obs_indices)
     if n_obs == 0:
@@ -209,14 +221,12 @@ def replay_dbscan(points, obs_mask, eps, min_samples, min_pts):
     ]) / counts[:, np.newaxis]
     voxel_centroids = voxel_centroids.astype(np.float32)
 
-    # DBSCAN
-    db = DBSCAN(eps=eps, min_samples=max(2, min_samples // 2), n_jobs=-1)
+    # DBSCAN (n_jobs=1 porque ya paralelizamos por combos)
+    db = DBSCAN(eps=eps, min_samples=max(2, min_samples // 2), n_jobs=1)
     voxel_labels = db.fit_predict(voxel_centroids)
 
-    # Propagar a puntos originales
     cluster_labels_obs = voxel_labels[inverse]
 
-    # Filtrar clusters pequeños
     max_label = cluster_labels_obs.max()
     N = len(points)
     if max_label >= 0:
@@ -237,170 +247,151 @@ def replay_dbscan(points, obs_mask, eps, min_samples, min_pts):
 
 
 # ========================================
-# BÚSQUEDAS
+# DATOS GLOBALES PARA MULTIPROCESSING (fork)
 # ========================================
 
-def search_delta_r(frames, grid, baseline_metrics, top_n):
-    """Grid search solo de umbrales delta-r (sin DBSCAN)."""
-    keys = list(grid.keys())
-    values = list(grid.values())
-    n_combos = 1
-    for v in values:
-        n_combos *= len(v)
+_GLOBAL_FRAMES = None  # Se rellena antes de Pool
 
-    results = []
+
+def _init_worker(frames):
+    """Inicializa variable global en cada worker (fork comparte memoria)."""
+    global _GLOBAL_FRAMES
+    _GLOBAL_FRAMES = frames
+
+
+# ========================================
+# WORKERS PARA POOL
+# ========================================
+
+def _eval_delta_r_combo(args):
+    """Worker: evalúa un combo delta-r sobre todos los frames."""
+    threshold_obs, threshold_void = args
+    total_tp, total_fp, total_fn = 0, 0, 0
+    for frame in _GLOBAL_FRAMES:
+        obs_mask = replay_delta_r_single(frame, threshold_obs, threshold_void)
+        tp, fp, fn = compute_metrics_accum(frame['gt_mask'], obs_mask)
+        total_tp += tp
+        total_fp += fp
+        total_fn += fn
+    m = metrics_from_accum(total_tp, total_fp, total_fn)
+    return {
+        'params': {'threshold_obs': threshold_obs, 'threshold_void': threshold_void},
+        **m,
+    }
+
+
+def _eval_dbscan_combo(args):
+    """Worker: evalúa un combo DBSCAN (con delta-r fijos) sobre todos los frames."""
+    threshold_obs, threshold_void, eps, min_samples, min_pts = args
+    total_tp, total_fp, total_fn = 0, 0, 0
+    for frame in _GLOBAL_FRAMES:
+        obs_mask = replay_delta_r_single(frame, threshold_obs, threshold_void)
+        obs_filtered = replay_dbscan(frame['points'], obs_mask, eps, min_samples, min_pts)
+        tp, fp, fn = compute_metrics_accum(frame['gt_mask'], obs_filtered)
+        total_tp += tp
+        total_fp += fp
+        total_fn += fn
+    m = metrics_from_accum(total_tp, total_fp, total_fn)
+    return {
+        'params': {
+            'threshold_obs': threshold_obs, 'threshold_void': threshold_void,
+            'cluster_eps': eps, 'cluster_min_samples': min_samples, 'cluster_min_pts': min_pts,
+        },
+        **m,
+    }
+
+
+def _eval_full_combo(args):
+    """Worker: evalúa un combo completo (delta-r + DBSCAN)."""
+    return _eval_dbscan_combo(args)
+
+
+# ========================================
+# BÚSQUEDAS PARALELAS
+# ========================================
+
+def search_delta_r_parallel(frames, grid, n_workers):
+    """Grid search paralelo de umbrales delta-r."""
+    combos = list(product(grid['threshold_obs'], grid['threshold_void']))
+    print(f"  [Delta-r] {len(combos)} combos × {len(frames)} frames, {n_workers} workers")
+
     t0 = time.time()
-
-    for idx, combo in enumerate(product(*values)):
-        params = dict(zip(keys, combo))
-
-        if (idx + 1) % 10 == 0 or idx == 0:
-            elapsed = time.time() - t0
-            eta = (elapsed / max(idx, 1)) * (n_combos - idx)
-            print(f"\r  [Delta-r] {idx+1}/{n_combos} (ETA: {eta:.0f}s)...", end="", flush=True)
-
-        obs_masks = replay_delta_r(frames, params['threshold_obs'], params['threshold_void'])
-
-        # Métricas promedio sobre todos los frames
-        frame_metrics = []
-        for i, fd in enumerate(frames):
-            m = compute_metrics(fd['gt_mask'], obs_masks[i])
-            frame_metrics.append(m)
-
-        avg_f1 = np.mean([m['f1'] for m in frame_metrics])
-        avg_iou = np.mean([m['iou'] for m in frame_metrics])
-        avg_p = np.mean([m['precision'] for m in frame_metrics])
-        avg_r = np.mean([m['recall'] for m in frame_metrics])
-        total_fp = sum(m['fp'] for m in frame_metrics)
-        total_fn = sum(m['fn'] for m in frame_metrics)
-
-        results.append({
-            'params': params,
-            'avg_f1': avg_f1,
-            'avg_iou': avg_iou,
-            'avg_p': avg_p,
-            'avg_r': avg_r,
-            'total_fp': total_fp,
-            'total_fn': total_fn,
-            'delta_f1': avg_f1 - baseline_metrics['avg_f1'],
-        })
+    # Delta-r es tan rápido que paralelizar puede tener más overhead que beneficio
+    # pero con miles de frames sí merece la pena
+    with Pool(n_workers, initializer=_init_worker, initargs=(frames,)) as pool:
+        results = pool.map(_eval_delta_r_combo, combos, chunksize=max(1, len(combos) // n_workers))
 
     t_total = time.time() - t0
-    print(f"\r  [Delta-r] {n_combos} combos en {t_total:.1f}s ({1000*t_total/n_combos:.1f}ms/combo)" + " " * 30)
+    print(f"  [Delta-r] {len(combos)} combos en {t_total:.1f}s")
 
-    results.sort(key=lambda x: x['avg_f1'], reverse=True)
+    results.sort(key=lambda x: x['f1'], reverse=True)
     return results
 
 
-def search_dbscan(frames, obs_masks_per_frame, grid, baseline_metrics, top_n):
-    """Grid search solo de DBSCAN (con umbrales delta-r fijos)."""
-    keys = list(grid.keys())
-    values = list(grid.values())
-    n_combos = 1
-    for v in values:
-        n_combos *= len(v)
+def search_dbscan_parallel(frames, delta_r_params, dbscan_grid, n_workers):
+    """Grid search paralelo de DBSCAN con delta-r fijos."""
+    thr_obs = delta_r_params['threshold_obs']
+    thr_void = delta_r_params['threshold_void']
 
-    results = []
+    combos = [
+        (thr_obs, thr_void, eps, ms, mp)
+        for eps, ms, mp in product(
+            dbscan_grid['cluster_eps'],
+            dbscan_grid['cluster_min_samples'],
+            dbscan_grid['cluster_min_pts'],
+        )
+    ]
+    print(f"  [DBSCAN] {len(combos)} combos × {len(frames)} frames, {n_workers} workers")
+
     t0 = time.time()
-
-    for idx, combo in enumerate(product(*values)):
-        params = dict(zip(keys, combo))
-
-        if (idx + 1) % 5 == 0 or idx == 0:
-            elapsed = time.time() - t0
-            eta = (elapsed / max(idx, 1)) * (n_combos - idx)
-            print(f"\r  [DBSCAN] {idx+1}/{n_combos} (ETA: {eta:.0f}s)...", end="", flush=True)
-
-        frame_metrics = []
-        for i, fd in enumerate(frames):
-            obs_filtered = replay_dbscan(
-                fd['points'], obs_masks_per_frame[i],
-                params['cluster_eps'], params['cluster_min_samples'], params['cluster_min_pts']
-            )
-            m = compute_metrics(fd['gt_mask'], obs_filtered)
-            frame_metrics.append(m)
-
-        avg_f1 = np.mean([m['f1'] for m in frame_metrics])
-        avg_iou = np.mean([m['iou'] for m in frame_metrics])
-        avg_p = np.mean([m['precision'] for m in frame_metrics])
-        avg_r = np.mean([m['recall'] for m in frame_metrics])
-        total_fp = sum(m['fp'] for m in frame_metrics)
-        total_fn = sum(m['fn'] for m in frame_metrics)
-
-        results.append({
-            'params': params,
-            'avg_f1': avg_f1,
-            'avg_iou': avg_iou,
-            'avg_p': avg_p,
-            'avg_r': avg_r,
-            'total_fp': total_fp,
-            'total_fn': total_fn,
-            'delta_f1': avg_f1 - baseline_metrics['avg_f1'],
-        })
+    with Pool(n_workers, initializer=_init_worker, initargs=(frames,)) as pool:
+        results = list(pool.imap_unordered(
+            _eval_dbscan_combo, combos,
+            chunksize=max(1, len(combos) // (n_workers * 4))
+        ))
 
     t_total = time.time() - t0
-    print(f"\r  [DBSCAN] {n_combos} combos en {t_total:.1f}s ({1000*t_total/n_combos:.2f}s/combo)" + " " * 30)
+    print(f"  [DBSCAN] {len(combos)} combos en {t_total:.1f}s ({t_total/len(combos):.2f}s/combo)")
 
-    results.sort(key=lambda x: x['avg_f1'], reverse=True)
+    results.sort(key=lambda x: x['f1'], reverse=True)
     return results
 
 
-def search_full(frames, delta_r_grid, dbscan_grid, baseline_metrics, top_n):
-    """Grid search combinado: delta-r × DBSCAN."""
-    all_keys = list(delta_r_grid.keys()) + list(dbscan_grid.keys())
-    all_values = list(delta_r_grid.values()) + list(dbscan_grid.values())
-    n_combos = 1
-    for v in all_values:
-        n_combos *= len(v)
+def search_full_parallel(frames, delta_r_grid, dbscan_grid, n_workers):
+    """Grid search paralelo combinado: delta-r × DBSCAN."""
+    combos = [
+        (thr_obs, thr_void, eps, ms, mp)
+        for thr_obs, thr_void, eps, ms, mp in product(
+            delta_r_grid['threshold_obs'],
+            delta_r_grid['threshold_void'],
+            dbscan_grid['cluster_eps'],
+            dbscan_grid['cluster_min_samples'],
+            dbscan_grid['cluster_min_pts'],
+        )
+    ]
+    n_combos = len(combos)
+    print(f"  [Full] {n_combos} combos × {len(frames)} frames, {n_workers} workers")
 
-    print(f"  Total combinaciones: {n_combos}")
-
-    results = []
     t0 = time.time()
+    done = [0]
 
-    for idx, combo in enumerate(product(*all_values)):
-        params = dict(zip(all_keys, combo))
-
-        if (idx + 1) % 20 == 0 or idx == 0:
-            elapsed = time.time() - t0
-            eta = (elapsed / max(idx, 1)) * (n_combos - idx)
-            print(f"\r  [Full] {idx+1}/{n_combos} (ETA: {eta:.0f}s)...", end="", flush=True)
-
-        # 1. Reclasificar delta-r
-        obs_masks = replay_delta_r(frames, params['threshold_obs'], params['threshold_void'])
-
-        # 2. DBSCAN
-        frame_metrics = []
-        for i, fd in enumerate(frames):
-            obs_filtered = replay_dbscan(
-                fd['points'], obs_masks[i],
-                params['cluster_eps'], params['cluster_min_samples'], params['cluster_min_pts']
-            )
-            m = compute_metrics(fd['gt_mask'], obs_filtered)
-            frame_metrics.append(m)
-
-        avg_f1 = np.mean([m['f1'] for m in frame_metrics])
-        avg_iou = np.mean([m['iou'] for m in frame_metrics])
-        avg_p = np.mean([m['precision'] for m in frame_metrics])
-        avg_r = np.mean([m['recall'] for m in frame_metrics])
-        total_fp = sum(m['fp'] for m in frame_metrics)
-        total_fn = sum(m['fn'] for m in frame_metrics)
-
-        results.append({
-            'params': params,
-            'avg_f1': avg_f1,
-            'avg_iou': avg_iou,
-            'avg_p': avg_p,
-            'avg_r': avg_r,
-            'total_fp': total_fp,
-            'total_fn': total_fn,
-            'delta_f1': avg_f1 - baseline_metrics['avg_f1'],
-        })
+    with Pool(n_workers, initializer=_init_worker, initargs=(frames,)) as pool:
+        results = []
+        chunksize = max(1, n_combos // (n_workers * 4))
+        for r in pool.imap_unordered(_eval_full_combo, combos, chunksize=chunksize):
+            results.append(r)
+            done[0] += 1
+            if done[0] % max(1, n_combos // 20) == 0 or done[0] == n_combos:
+                elapsed = time.time() - t0
+                eta = (elapsed / done[0]) * (n_combos - done[0])
+                print(f"\r  [Full] {done[0]}/{n_combos} ({100*done[0]/n_combos:.0f}%) "
+                      f"ETA: {eta:.0f}s", end="", flush=True)
 
     t_total = time.time() - t0
-    print(f"\r  [Full] {n_combos} combos en {t_total:.1f}s ({1000*t_total/n_combos:.0f}ms/combo)" + " " * 30)
+    print(f"\r  [Full] {n_combos} combos en {t_total:.1f}s "
+          f"({t_total/n_combos:.3f}s/combo)" + " " * 30)
 
-    results.sort(key=lambda x: x['avg_f1'], reverse=True)
+    results.sort(key=lambda x: x['f1'], reverse=True)
     return results
 
 
@@ -408,57 +399,50 @@ def search_full(frames, delta_r_grid, dbscan_grid, baseline_metrics, top_n):
 # IMPRESIÓN DE RESULTADOS
 # ========================================
 
-def print_results_delta_r(results, baseline, top_n, title):
-    """Imprime tabla de resultados para búsqueda delta-r."""
-    print(f"\n  {'='*90}")
-    print(f"  {title}")
-    print(f"  Baseline: F1={100*baseline['avg_f1']:.1f}%  IoU={100*baseline['avg_iou']:.1f}%")
-    print(f"  {'='*90}")
-    print(f"  {'#':>3} {'thr_obs':>8} {'thr_void':>9} | {'F1':>7} {'IoU':>7} {'dF1':>7} {'P':>7} {'R':>7} {'FP':>8} {'FN':>8}")
-    print(f"  {'-'*85}")
+def print_results(results, baseline_f1, baseline_iou, top_n, title, mode):
+    """Imprime tabla de resultados."""
+    print(f"\n{'='*120}")
+    print(f"{title}")
+    print(f"Baseline: F1={100*baseline_f1:.2f}%  IoU={100*baseline_iou:.2f}%")
+    print(f"{'='*120}")
 
-    for i, r in enumerate(results[:top_n]):
-        p = r['params']
-        marker = " *" if r['delta_f1'] > 0.001 else ""
-        print(f"  {i+1:>3} {p['threshold_obs']:>8.2f} {p['threshold_void']:>9.2f}"
-              f" | {100*r['avg_f1']:>6.1f}% {100*r['avg_iou']:>6.1f}% {100*r['delta_f1']:>+6.2f}%"
-              f" {100*r['avg_p']:>6.1f}% {100*r['avg_r']:>6.1f}% {r['total_fp']:>8} {r['total_fn']:>8}{marker}")
+    if mode == 'delta_r':
+        print(f"{'#':>4} {'thr_obs':>8} {'thr_void':>9} | {'F1':>8} {'IoU':>8} "
+              f"{'dF1':>8} {'P':>8} {'R':>8} {'FP':>10} {'FN':>10}")
+        print("-" * 100)
+        for i, r in enumerate(results[:top_n]):
+            p = r['params']
+            df1 = r['f1'] - baseline_f1
+            marker = " *" if df1 > 0.0001 else ""
+            print(f"{i+1:>4} {p['threshold_obs']:>8.2f} {p['threshold_void']:>9.2f}"
+                  f" | {100*r['f1']:>7.2f}% {100*r['iou']:>7.2f}% {100*df1:>+7.2f}%"
+                  f" {100*r['precision']:>7.2f}% {100*r['recall']:>7.2f}%"
+                  f" {r['fp']:>10} {r['fn']:>10}{marker}")
+    else:
+        print(f"{'#':>4} {'thr_obs':>8} {'thr_void':>9} {'eps':>6} {'ms':>4} {'mp':>4}"
+              f" | {'F1':>8} {'IoU':>8} {'dF1':>8} {'P':>8} {'R':>8} {'FP':>10} {'FN':>10}")
+        print("-" * 120)
+        for i, r in enumerate(results[:top_n]):
+            p = r['params']
+            df1 = r['f1'] - baseline_f1
+            marker = " *" if df1 > 0.0001 else ""
+            print(f"{i+1:>4} {p['threshold_obs']:>8.2f} {p['threshold_void']:>9.2f}"
+                  f" {p['cluster_eps']:>6.2f} {p['cluster_min_samples']:>4} {p['cluster_min_pts']:>4}"
+                  f" | {100*r['f1']:>7.2f}% {100*r['iou']:>7.2f}% {100*df1:>+7.2f}%"
+                  f" {100*r['precision']:>7.2f}% {100*r['recall']:>7.2f}%"
+                  f" {r['fp']:>10} {r['fn']:>10}{marker}")
 
+    n_better = sum(1 for r in results if r['f1'] > baseline_f1 + 0.0001)
+    print(f"\n{n_better}/{len(results)} combinaciones mejoran vs baseline")
 
-def print_results_dbscan(results, baseline, top_n, title):
-    """Imprime tabla de resultados para búsqueda DBSCAN."""
-    print(f"\n  {'='*105}")
-    print(f"  {title}")
-    print(f"  Baseline (sin DBSCAN): F1={100*baseline['avg_f1']:.1f}%  IoU={100*baseline['avg_iou']:.1f}%")
-    print(f"  {'='*105}")
-    print(f"  {'#':>3} {'eps':>6} {'min_s':>6} {'min_p':>6} | {'F1':>7} {'IoU':>7} {'dF1':>7} {'P':>7} {'R':>7} {'FP':>8} {'FN':>8}")
-    print(f"  {'-'*95}")
-
-    for i, r in enumerate(results[:top_n]):
-        p = r['params']
-        marker = " *" if r['delta_f1'] > 0.001 else ""
-        print(f"  {i+1:>3} {p['cluster_eps']:>6.2f} {p['cluster_min_samples']:>6} {p['cluster_min_pts']:>6}"
-              f" | {100*r['avg_f1']:>6.1f}% {100*r['avg_iou']:>6.1f}% {100*r['delta_f1']:>+6.2f}%"
-              f" {100*r['avg_p']:>6.1f}% {100*r['avg_r']:>6.1f}% {r['total_fp']:>8} {r['total_fn']:>8}{marker}")
-
-
-def print_results_full(results, baseline, top_n, title):
-    """Imprime tabla de resultados para búsqueda combinada."""
-    print(f"\n  {'='*120}")
-    print(f"  {title}")
-    print(f"  Baseline (actual): F1={100*baseline['avg_f1']:.1f}%  IoU={100*baseline['avg_iou']:.1f}%")
-    print(f"  {'='*120}")
-    print(f"  {'#':>3} {'thr_obs':>8} {'thr_void':>9} {'eps':>6} {'min_s':>6} {'min_p':>6}"
-          f" | {'F1':>7} {'IoU':>7} {'dF1':>7} {'P':>7} {'R':>7} {'FP':>8} {'FN':>8}")
-    print(f"  {'-'*110}")
-
-    for i, r in enumerate(results[:top_n]):
-        p = r['params']
-        marker = " *" if r['delta_f1'] > 0.001 else ""
-        print(f"  {i+1:>3} {p['threshold_obs']:>8.2f} {p['threshold_void']:>9.2f}"
-              f" {p['cluster_eps']:>6.2f} {p['cluster_min_samples']:>6} {p['cluster_min_pts']:>6}"
-              f" | {100*r['avg_f1']:>6.1f}% {100*r['avg_iou']:>6.1f}% {100*r['delta_f1']:>+6.2f}%"
-              f" {100*r['avg_p']:>6.1f}% {100*r['avg_r']:>6.1f}% {r['total_fp']:>8} {r['total_fn']:>8}{marker}")
+    if results and results[0]['f1'] > baseline_f1:
+        best = results[0]
+        p = best['params']
+        params_str = ', '.join(f"{k}={v}" for k, v in p.items())
+        df1 = best['f1'] - baseline_f1
+        print(f"MEJOR: {params_str}")
+        print(f"  F1={100*best['f1']:.2f}% ({100*df1:+.2f}%)  "
+              f"IoU={100*best['iou']:.2f}%  P={100*best['precision']:.2f}%  R={100*best['recall']:.2f}%")
 
 
 # ========================================
@@ -466,230 +450,196 @@ def print_results_full(results, baseline, top_n, title):
 # ========================================
 
 def main():
-    parser = argparse.ArgumentParser(description='Grid Search delta-r + DBSCAN')
-    parser.add_argument('--scan_start', type=int, default=0)
-    parser.add_argument('--n_frames', type=int, default=10, help='Número de frames a evaluar')
-    parser.add_argument('--seq', type=str, default='both', choices=['00', '04', 'both'])
+    parser = argparse.ArgumentParser(
+        description='Grid Search PARALELO delta-r + DBSCAN (todas las secuencias SemanticKITTI)')
+    parser.add_argument('--seq', type=str, nargs='*', default=None,
+                        help='Secuencias a usar (ej: 00 04 05). Default: todas las disponibles')
+    parser.add_argument('--stride', type=int, default=1,
+                        help='Usar 1 de cada N frames (default: 1 = todos)')
     parser.add_argument('--mode', type=str, default='full',
-                        choices=['delta_r', 'dbscan', 'full'],
-                        help='delta_r: solo umbrales | dbscan: solo clustering | full: ambos')
-    parser.add_argument('--top', type=int, default=15, help='Mostrar los N mejores resultados')
+                        choices=['delta_r', 'dbscan', 'full'])
+    parser.add_argument('--workers', type=int, default=0,
+                        help='Número de workers (default: cpu_count)')
+    parser.add_argument('--top', type=int, default=20)
     args = parser.parse_args()
+
+    n_workers = args.workers if args.workers > 0 else cpu_count()
+
+    # Descubrir secuencias
+    if args.seq:
+        seqs = args.seq
+    else:
+        seqs = discover_sequences()
+    if not seqs:
+        print("ERROR: No se encontraron secuencias con velodyne + labels")
+        return
 
     delta_r_grid = get_delta_r_grid()
     dbscan_grid = get_dbscan_grid()
 
-    n_delta_r = 1
+    n_dr = 1
     for v in delta_r_grid.values():
-        n_delta_r *= len(v)
-    n_dbscan = 1
+        n_dr *= len(v)
+    n_db = 1
     for v in dbscan_grid.values():
-        n_dbscan *= len(v)
+        n_db *= len(v)
 
-    print("=" * 100)
-    print("GRID SEARCH - PARÁMETROS DELTA-R + DBSCAN")
-    print("=" * 100)
-    print(f"\nModo: {args.mode}")
+    print("=" * 120)
+    print("GRID SEARCH PARALELO — PARÁMETROS DELTA-R + DBSCAN")
+    print("=" * 120)
+    print(f"\nSecuencias: {seqs}")
+    print(f"Stride: {args.stride} (1 de cada {args.stride} frames)")
+    print(f"Workers: {n_workers}")
+    print(f"Modo: {args.mode}")
     if args.mode in ('delta_r', 'full'):
-        print(f"\nDelta-r ({n_delta_r} combos):")
-        for key, values in delta_r_grid.items():
-            print(f"  {key}: {values}")
+        print(f"Delta-r: {n_dr} combos — {delta_r_grid}")
     if args.mode in ('dbscan', 'full'):
-        print(f"\nDBSCAN ({n_dbscan} combos):")
-        for key, values in dbscan_grid.items():
-            print(f"  {key}: {values}")
+        print(f"DBSCAN: {n_db} combos — {dbscan_grid}")
     if args.mode == 'full':
-        print(f"\nTotal combinaciones: {n_delta_r * n_dbscan}")
+        print(f"Total combos: {n_dr * n_db}")
 
-    seqs = []
-    if args.seq in ('04', 'both'):
-        seqs.append('04')
-    if args.seq in ('00', 'both'):
-        seqs.append('00')
+    # ========================================
+    # PRECOMPUTAR Stage 1 + delta_r (TODAS las secuencias)
+    # ========================================
+    print(f"\n{'='*120}")
+    print("FASE 1: PRECOMPUTACIÓN Stage 1 + delta_r")
+    print(f"{'='*120}")
 
-    all_seq_results = {}
+    all_frames = []
+    seq_frame_counts = {}
+    t0_total = time.time()
 
     for seq in seqs:
-        info = get_sequence_info(seq)
-        if not info['data_dir'].exists():
-            print(f"\n  [SKIP] Datos no encontrados: {info['data_dir']}")
+        scan_ids = discover_scan_ids(seq, stride=args.stride)
+        if not scan_ids:
+            print(f"  Seq {seq}: SKIP (sin datos)")
             continue
 
-        scan_ids = list(range(args.scan_start, args.scan_start + args.n_frames))
+        print(f"\n  Seq {seq}: {len(scan_ids)} frames (de {scan_ids[0]} a {scan_ids[-1]}, stride={args.stride})")
+        t0 = time.time()
 
-        print(f"\n{'='*100}")
-        print(f"SECUENCIA {seq} | Frames {scan_ids[0]}-{scan_ids[-1]} ({args.n_frames} frames)")
-        print(f"{'='*100}")
-
-        # ========================================
-        # PRECOMPUTAR Stage 1 + delta_r
-        # ========================================
-        print("\n  [Precomputo] Stage 1 (Patchwork++) + delta_r continuo...", end=" ", flush=True)
-        t0_pre = time.time()
         frames = precompute_stage1_and_delta_r(seq, scan_ids)
-        t_pre = time.time() - t0_pre
-        n_pts_total = sum(fd['n_points'] for fd in frames)
-        n_gt_total = sum(fd['gt_mask'].sum() for fd in frames)
-        print(f"OK ({t_pre:.1f}s) | {n_pts_total} pts, {n_gt_total} GT obs")
+        n_pts = sum(f['n_points'] for f in frames)
+        n_gt = sum(int(f['gt_mask'].sum()) for f in frames)
+        elapsed = time.time() - t0
+        fps = len(frames) / elapsed if elapsed > 0 else 0
 
-        # ========================================
-        # BASELINE: parámetros actuales (sin DBSCAN)
-        # ========================================
-        current_thr_obs = -0.5
-        current_thr_void = 0.8
-        baseline_obs_masks = replay_delta_r(frames, current_thr_obs, current_thr_void)
-        baseline_frame_metrics = [compute_metrics(fd['gt_mask'], baseline_obs_masks[i])
-                                   for i, fd in enumerate(frames)]
-        baseline = {
-            'avg_f1': np.mean([m['f1'] for m in baseline_frame_metrics]),
-            'avg_iou': np.mean([m['iou'] for m in baseline_frame_metrics]),
-            'avg_p': np.mean([m['precision'] for m in baseline_frame_metrics]),
-            'avg_r': np.mean([m['recall'] for m in baseline_frame_metrics]),
-        }
-        print(f"  Baseline (thr_obs={current_thr_obs}, thr_void={current_thr_void}, sin DBSCAN):")
-        print(f"    F1={100*baseline['avg_f1']:.1f}%  IoU={100*baseline['avg_iou']:.1f}%"
-              f"  P={100*baseline['avg_p']:.1f}%  R={100*baseline['avg_r']:.1f}%")
+        print(f"    OK ({elapsed:.1f}s, {fps:.1f} fps) | {n_pts:,} pts, {n_gt:,} GT obs")
 
-        # ========================================
-        # BASELINE con DBSCAN actual
-        # ========================================
-        current_eps = 0.8
-        current_min_samples = 8
-        current_min_pts = 30
-        baseline_dbscan_metrics = []
-        for i, fd in enumerate(frames):
-            obs_filtered = replay_dbscan(fd['points'], baseline_obs_masks[i],
-                                          current_eps, current_min_samples, current_min_pts)
-            m = compute_metrics(fd['gt_mask'], obs_filtered)
-            baseline_dbscan_metrics.append(m)
-        baseline_with_dbscan = {
-            'avg_f1': np.mean([m['f1'] for m in baseline_dbscan_metrics]),
-            'avg_iou': np.mean([m['iou'] for m in baseline_dbscan_metrics]),
-            'avg_p': np.mean([m['precision'] for m in baseline_dbscan_metrics]),
-            'avg_r': np.mean([m['recall'] for m in baseline_dbscan_metrics]),
-        }
-        print(f"  Baseline con DBSCAN (eps={current_eps}, min_s={current_min_samples}, min_p={current_min_pts}):")
-        print(f"    F1={100*baseline_with_dbscan['avg_f1']:.1f}%  IoU={100*baseline_with_dbscan['avg_iou']:.1f}%"
-              f"  P={100*baseline_with_dbscan['avg_p']:.1f}%  R={100*baseline_with_dbscan['avg_r']:.1f}%")
+        all_frames.extend(frames)
+        seq_frame_counts[seq] = len(frames)
 
-        # ========================================
-        # BÚSQUEDAS
-        # ========================================
-        seq_results = {'baseline': baseline, 'baseline_dbscan': baseline_with_dbscan}
+    total_frames = len(all_frames)
+    t_precomp = time.time() - t0_total
+    total_pts = sum(f['n_points'] for f in all_frames)
+    total_gt = sum(int(f['gt_mask'].sum()) for f in all_frames)
+    mem_estimate_mb = sum(
+        f['points'].nbytes + f['delta_r'].nbytes + f['gt_mask'].nbytes + f['rejected_wall_indices'].nbytes
+        for f in all_frames
+    ) / 1e6
 
-        if args.mode == 'delta_r':
-            results = search_delta_r(frames, delta_r_grid, baseline, args.top)
-            print_results_delta_r(results, baseline, args.top,
-                                   f"TOP {args.top} DELTA-R — SECUENCIA {seq}")
-            seq_results['delta_r'] = results
+    print(f"\n  TOTAL: {total_frames} frames, {total_pts:,} pts, {total_gt:,} GT obs")
+    print(f"  Precomputación: {t_precomp:.1f}s | RAM estimada: {mem_estimate_mb:.0f} MB")
 
-            # Resumen
-            n_better = sum(1 for r in results if r['delta_f1'] > 0.001)
-            print(f"\n  {n_better}/{len(results)} combinaciones mejoran vs baseline")
-            if results and results[0]['delta_f1'] > 0:
-                best = results[0]
-                print(f"  MEJOR: threshold_obs={best['params']['threshold_obs']}, "
-                      f"threshold_void={best['params']['threshold_void']} "
-                      f"→ F1={100*best['avg_f1']:.1f}% ({100*best['delta_f1']:+.2f}%)")
-
-        elif args.mode == 'dbscan':
-            results = search_dbscan(frames, baseline_obs_masks, dbscan_grid, baseline, args.top)
-            print_results_dbscan(results, baseline, args.top,
-                                  f"TOP {args.top} DBSCAN — SECUENCIA {seq}")
-            seq_results['dbscan'] = results
-
-            n_better = sum(1 for r in results if r['delta_f1'] > 0.001)
-            print(f"\n  {n_better}/{len(results)} combinaciones mejoran vs baseline (sin DBSCAN)")
-
-        elif args.mode == 'full':
-            results = search_full(frames, delta_r_grid, dbscan_grid, baseline_with_dbscan, args.top)
-            print_results_full(results, baseline_with_dbscan, args.top,
-                                f"TOP {args.top} FULL — SECUENCIA {seq}")
-            seq_results['full'] = results
-
-            n_better = sum(1 for r in results if r['delta_f1'] > 0.001)
-            print(f"\n  {n_better}/{len(results)} combinaciones mejoran vs baseline actual")
-            if results and results[0]['delta_f1'] > 0:
-                best = results[0]
-                p = best['params']
-                print(f"  MEJOR: thr_obs={p['threshold_obs']}, thr_void={p['threshold_void']}, "
-                      f"eps={p['cluster_eps']}, min_s={p['cluster_min_samples']}, min_p={p['cluster_min_pts']} "
-                      f"→ F1={100*best['avg_f1']:.1f}% ({100*best['delta_f1']:+.2f}%)")
-
-        all_seq_results[seq] = seq_results
+    if total_frames == 0:
+        print("ERROR: No hay frames disponibles")
+        return
 
     # ========================================
-    # RESUMEN GLOBAL (si ambas secuencias)
+    # BASELINES
     # ========================================
-    if len(all_seq_results) == 2 and args.mode in ('delta_r', 'full'):
-        print(f"\n{'='*100}")
-        print(f"RESUMEN GLOBAL — MEJOR POR MEDIA F1 (AMBAS SECUENCIAS)")
-        print(f"{'='*100}")
+    print(f"\n{'='*120}")
+    print("FASE 2: BASELINES")
+    print(f"{'='*120}")
 
-        key = 'delta_r' if args.mode == 'delta_r' else 'full'
+    current_thr_obs = -0.5
+    current_thr_void = 0.8
+    current_eps = 0.8
+    current_min_samples = 8
+    current_min_pts = 30
 
-        # Indexar por parámetros
-        results_04 = {str(r['params']): r for r in all_seq_results['04'][key]}
-        results_00 = {str(r['params']): r for r in all_seq_results['00'][key]}
+    # Baseline sin DBSCAN
+    bl_tp, bl_fp, bl_fn = 0, 0, 0
+    baseline_obs_masks = []
+    for f in all_frames:
+        obs_mask = replay_delta_r_single(f, current_thr_obs, current_thr_void)
+        baseline_obs_masks.append(obs_mask)
+        tp, fp, fn = compute_metrics_accum(f['gt_mask'], obs_mask)
+        bl_tp += tp
+        bl_fp += fp
+        bl_fn += fn
+    baseline = metrics_from_accum(bl_tp, bl_fp, bl_fn)
+    print(f"\n  Baseline (thr_obs={current_thr_obs}, thr_void={current_thr_void}, sin DBSCAN):")
+    print(f"    F1={100*baseline['f1']:.2f}%  IoU={100*baseline['iou']:.2f}%  "
+          f"P={100*baseline['precision']:.2f}%  R={100*baseline['recall']:.2f}%")
 
-        bl_04 = all_seq_results['04']['baseline' if args.mode == 'delta_r' else 'baseline_dbscan']
-        bl_00 = all_seq_results['00']['baseline' if args.mode == 'delta_r' else 'baseline_dbscan']
-        bl_avg = (bl_04['avg_f1'] + bl_00['avg_f1']) / 2
+    # Baseline con DBSCAN
+    bld_tp, bld_fp, bld_fn = 0, 0, 0
+    for i, f in enumerate(all_frames):
+        obs_filtered = replay_dbscan(
+            f['points'], baseline_obs_masks[i],
+            current_eps, current_min_samples, current_min_pts
+        )
+        tp, fp, fn = compute_metrics_accum(f['gt_mask'], obs_filtered)
+        bld_tp += tp
+        bld_fp += fp
+        bld_fn += fn
+    baseline_dbscan = metrics_from_accum(bld_tp, bld_fp, bld_fn)
+    print(f"  Baseline con DBSCAN (eps={current_eps}, ms={current_min_samples}, mp={current_min_pts}):")
+    print(f"    F1={100*baseline_dbscan['f1']:.2f}%  IoU={100*baseline_dbscan['iou']:.2f}%  "
+          f"P={100*baseline_dbscan['precision']:.2f}%  R={100*baseline_dbscan['recall']:.2f}%")
 
-        combined = []
-        for pkey in results_04:
-            if pkey in results_00:
-                r04 = results_04[pkey]
-                r00 = results_00[pkey]
-                avg_f1 = (r04['avg_f1'] + r00['avg_f1']) / 2
-                avg_iou = (r04['avg_iou'] + r00['avg_iou']) / 2
-                combined.append({
-                    'params': r04['params'],
-                    'f1_04': r04['avg_f1'],
-                    'f1_00': r00['avg_f1'],
-                    'iou_04': r04['avg_iou'],
-                    'iou_00': r00['avg_iou'],
-                    'avg_f1': avg_f1,
-                    'avg_iou': avg_iou,
-                    'delta_avg': avg_f1 - bl_avg,
-                })
+    del baseline_obs_masks  # Liberar memoria
 
-        combined.sort(key=lambda x: x['avg_f1'], reverse=True)
+    # ========================================
+    # GRID SEARCH
+    # ========================================
+    print(f"\n{'='*120}")
+    print("FASE 3: GRID SEARCH")
+    print(f"{'='*120}")
 
-        print(f"\n  Baseline: Seq04 F1={100*bl_04['avg_f1']:.1f}%  Seq00 F1={100*bl_00['avg_f1']:.1f}%  Media={100*bl_avg:.1f}%")
+    if args.mode == 'delta_r':
+        results = search_delta_r_parallel(all_frames, delta_r_grid, n_workers)
+        print_results(results, baseline['f1'], baseline['iou'], args.top,
+                      f"TOP {args.top} DELTA-R (micro-avg, {total_frames} frames, {len(seq_frame_counts)} seqs)",
+                      'delta_r')
 
-        if args.mode == 'delta_r':
-            print(f"\n  {'#':>3} {'thr_obs':>8} {'thr_void':>9} | {'04 F1':>7} {'00 F1':>7} {'Media':>7} {'dMedia':>7} | {'04 IoU':>7} {'00 IoU':>7}")
-            print(f"  {'-'*85}")
-            for i, c in enumerate(combined[:args.top]):
-                p = c['params']
-                marker = " *" if c['delta_avg'] > 0.001 else ""
-                print(f"  {i+1:>3} {p['threshold_obs']:>8.2f} {p['threshold_void']:>9.2f}"
-                      f" | {100*c['f1_04']:>6.1f}% {100*c['f1_00']:>6.1f}% {100*c['avg_f1']:>6.1f}% {100*c['delta_avg']:>+6.2f}%"
-                      f" | {100*c['iou_04']:>6.1f}% {100*c['iou_00']:>6.1f}%{marker}")
-        else:
-            print(f"\n  {'#':>3} {'thr_obs':>8} {'thr_void':>9} {'eps':>6} {'min_s':>6} {'min_p':>6}"
-                  f" | {'04 F1':>7} {'00 F1':>7} {'Media':>7} {'dMedia':>7}")
-            print(f"  {'-'*100}")
-            for i, c in enumerate(combined[:args.top]):
-                p = c['params']
-                marker = " *" if c['delta_avg'] > 0.001 else ""
-                print(f"  {i+1:>3} {p['threshold_obs']:>8.2f} {p['threshold_void']:>9.2f}"
-                      f" {p['cluster_eps']:>6.2f} {p['cluster_min_samples']:>6} {p['cluster_min_pts']:>6}"
-                      f" | {100*c['f1_04']:>6.1f}% {100*c['f1_00']:>6.1f}% {100*c['avg_f1']:>6.1f}% {100*c['delta_avg']:>+6.2f}%{marker}")
+    elif args.mode == 'dbscan':
+        results = search_dbscan_parallel(
+            all_frames,
+            {'threshold_obs': current_thr_obs, 'threshold_void': current_thr_void},
+            dbscan_grid, n_workers
+        )
+        print_results(results, baseline['f1'], baseline['iou'], args.top,
+                      f"TOP {args.top} DBSCAN (micro-avg, {total_frames} frames, {len(seq_frame_counts)} seqs)",
+                      'dbscan')
 
-        n_better = sum(1 for c in combined if c['delta_avg'] > 0.001)
-        print(f"\n  {n_better}/{len(combined)} combinaciones mejoran la media F1")
+    elif args.mode == 'full':
+        results = search_full_parallel(all_frames, delta_r_grid, dbscan_grid, n_workers)
+        print_results(results, baseline_dbscan['f1'], baseline_dbscan['iou'], args.top,
+                      f"TOP {args.top} FULL (micro-avg, {total_frames} frames, {len(seq_frame_counts)} seqs)",
+                      'full')
 
-        if combined and combined[0]['delta_avg'] > 0:
-            best = combined[0]
-            print(f"\n  ÓPTIMO GLOBAL:")
-            p = best['params']
-            params_str = ', '.join(f"{k}={v}" for k, v in p.items())
-            print(f"    {params_str}")
-            print(f"    Seq04: F1={100*best['f1_04']:.1f}%  Seq00: F1={100*best['f1_00']:.1f}%  Media: {100*best['avg_f1']:.1f}% ({100*best['delta_avg']:+.2f}%)")
-        else:
-            print(f"\n  Los parámetros actuales ya son óptimos dentro del grid explorado.")
+    # ========================================
+    # RESUMEN FINAL
+    # ========================================
+    t_total = time.time() - t0_total
+    print(f"\n{'='*120}")
+    print("RESUMEN")
+    print(f"{'='*120}")
+    print(f"  Secuencias: {list(seq_frame_counts.keys())}")
+    print(f"  Frames por secuencia: {seq_frame_counts}")
+    print(f"  Total frames: {total_frames}")
+    print(f"  Baseline sin DBSCAN: F1={100*baseline['f1']:.2f}%  IoU={100*baseline['iou']:.2f}%")
+    print(f"  Baseline con DBSCAN: F1={100*baseline_dbscan['f1']:.2f}%  IoU={100*baseline_dbscan['iou']:.2f}%")
+    if results:
+        best = results[0]
+        ref_f1 = baseline_dbscan['f1'] if args.mode == 'full' else baseline['f1']
+        df1 = best['f1'] - ref_f1
+        p = best['params']
+        print(f"  Mejor encontrado: F1={100*best['f1']:.2f}% ({100*df1:+.2f}%)")
+        print(f"    Params: {', '.join(f'{k}={v}' for k, v in p.items())}")
+    print(f"  Tiempo total: {t_total:.0f}s ({t_total/60:.1f} min)")
 
 
 if __name__ == '__main__':
