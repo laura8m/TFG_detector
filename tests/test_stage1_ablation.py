@@ -38,16 +38,18 @@ from data_paths import get_scan_file, get_label_file
 # SemanticKITTI ground labels
 GROUND_LABELS = {40, 44, 48, 49, 60, 72}  # road, parking, sidewalk, other-ground, lane-marking, terrain
 
-# SemanticKITTI obstacle labels
+# SemanticKITTI obstacle labels (NO 52/99 = ignored en learning_map)
 OBSTACLE_LABELS = {
     10, 11, 13, 15, 16, 18, 20,       # vehicles
     30, 31, 32,                         # persons
-    50, 51, 52,                         # structures
+    50, 51,                             # structures
     70, 71,                             # vegetation
     80, 81,                             # poles
-    99,                                 # other-object
     252, 253, 254, 255, 256, 257, 258, 259  # moving objects
 }
+
+# Labels ignorados en evaluación (learning_map → 0 en SemanticKITTI)
+IGNORE_LABELS = {0, 1, 52, 99}
 
 
 def load_kitti_scan(scan_id, seq):
@@ -78,7 +80,18 @@ def get_gt_obstacle_mask(semantic_labels):
     return mask
 
 
-def compute_metrics(gt_mask, pred_mask):
+def get_valid_mask(semantic_labels):
+    """Máscara de puntos válidos (excluye unlabeled, outlier, other-structure, other-object)"""
+    mask = np.ones(len(semantic_labels), dtype=bool)
+    for label in IGNORE_LABELS:
+        mask &= (semantic_labels != label)
+    return mask
+
+
+def compute_metrics(gt_mask, pred_mask, valid_mask=None):
+    if valid_mask is not None:
+        gt_mask = gt_mask & valid_mask
+        pred_mask = pred_mask & valid_mask
     tp = int(np.sum(gt_mask & pred_mask))
     fp = int(np.sum((~gt_mask) & pred_mask))
     fn = int(np.sum(gt_mask & (~pred_mask)))
@@ -131,6 +144,7 @@ def test_sequence(seq, n_frames, scan_start):
         pts, labels = load_kitti_scan(scan_id, seq)
         gt_ground = get_gt_ground_mask(labels)
         gt_obs = get_gt_obstacle_mask(labels)
+        valid_mask = get_valid_mask(labels)
 
         print(f"\n  Frame {scan_id}: {len(pts)} pts | GT ground={gt_ground.sum()} obs={gt_obs.sum()}")
 
@@ -147,16 +161,16 @@ def test_sequence(seq, n_frames, scan_start):
             pred_ground = np.zeros(len(pts), dtype=bool)
             pred_ground[r1['ground_indices']] = True
 
-            # Métricas ground segmentation
-            m_gnd = compute_metrics(gt_ground, pred_ground)
+            # Métricas ground segmentation (solo puntos válidos)
+            m_gnd = compute_metrics(gt_ground, pred_ground, valid_mask)
             gnd_accum[name]['tp'] += m_gnd['tp']
             gnd_accum[name]['fp'] += m_gnd['fp']
             gnd_accum[name]['fn'] += m_gnd['fn']
 
-            # Obstacle leak: obstáculos GT que Stage 1 clasifica como ground
-            obs_in_ground = int(np.sum(gt_obs & pred_ground))
+            # Obstacle leak: obstáculos GT que Stage 1 clasifica como ground (solo válidos)
+            obs_in_ground = int(np.sum(gt_obs & pred_ground & valid_mask))
             obs_leak_accum[name]['leaked'] += obs_in_ground
-            obs_leak_accum[name]['total_obs'] += int(gt_obs.sum())
+            obs_leak_accum[name]['total_obs'] += int((gt_obs & valid_mask).sum())
 
             # --- Stage 2 (delta-r) ---
             t2 = time.time()
@@ -165,8 +179,8 @@ def test_sequence(seq, n_frames, scan_start):
             # Stage 2 incluye Stage 1 internamente, así que el tiempo real de Stage 2 solo es:
             timing_s2[name].append((t2_end - t2) * 1000)
 
-            # Métricas de detección de obstáculos
-            m_obs = compute_metrics(gt_obs, r2['obs_mask'])
+            # Métricas de detección de obstáculos (solo puntos válidos)
+            m_obs = compute_metrics(gt_obs, r2['obs_mask'], valid_mask)
             obs_accum[name]['tp'] += m_obs['tp']
             obs_accum[name]['fp'] += m_obs['fp']
             obs_accum[name]['fn'] += m_obs['fn']

@@ -80,9 +80,12 @@ def discover_scan_ids(seq, stride=1):
 
 OBSTACLE_LABELS = np.array([
     10, 11, 13, 15, 16, 18, 20, 30, 31, 32,
-    50, 51, 52, 70, 71, 80, 81, 99,
+    50, 51, 70, 71, 80, 81,
     252, 253, 254, 255, 256, 257, 258, 259
 ], dtype=np.uint32)
+
+# Labels ignorados en evaluación (learning_map → 0 en SemanticKITTI)
+IGNORE_LABELS = np.array([0, 1, 52, 99], dtype=np.uint32)
 
 
 def load_kitti_scan(scan_id: int, seq: str):
@@ -101,7 +104,10 @@ def get_gt_obstacle_mask(semantic_labels):
     return np.isin(semantic_labels, OBSTACLE_LABELS)
 
 
-def compute_metrics_accum(gt_mask, pred_mask):
+def compute_metrics_accum(gt_mask, pred_mask, valid_mask=None):
+    if valid_mask is not None:
+        gt_mask = gt_mask & valid_mask
+        pred_mask = pred_mask & valid_mask
     tp = int(np.sum(gt_mask & pred_mask))
     fp = int(np.sum((~gt_mask) & pred_mask))
     fn = int(np.sum(gt_mask & (~pred_mask)))
@@ -198,13 +204,14 @@ def load_all_data(seqs, stride):
         for scan_id in scan_ids:
             pts, labels = load_kitti_scan(scan_id, seq)
             gt_mask = get_gt_obstacle_mask(labels)
-            all_data.append((seq, scan_id, pts, gt_mask))
+            valid_mask = ~np.isin(labels, IGNORE_LABELS)
+            all_data.append((seq, scan_id, pts, gt_mask, valid_mask))
 
         seq_counts[seq] = len(scan_ids)
         print(f"OK ({time.time()-t_seq:.1f}s)")
 
     t_total = time.time() - t0
-    mem_mb = sum(d[2].nbytes + d[3].nbytes for d in all_data) / 1e6
+    mem_mb = sum(d[2].nbytes + d[3].nbytes + d[4].nbytes for d in all_data) / 1e6
     print(f"\n  Total: {len(all_data)} frames | {mem_mb:.0f} MB | {t_total:.1f}s")
     return all_data, seq_counts
 
@@ -243,7 +250,7 @@ def _eval_wall_combo(args):
     total_tp, total_fp, total_fn = 0, 0, 0
     total_walls = 0
 
-    for seq, scan_id, pts, gt_mask in _GLOBAL_DATA:
+    for seq, scan_id, pts, gt_mask, valid_mask in _GLOBAL_DATA:
         result = pipeline.stage2_complete(pts)
         obs_mask = result['obs_mask']
         total_walls += len(result.get('rejected_walls', []))
@@ -254,7 +261,7 @@ def _eval_wall_combo(args):
                 fp['cluster_eps'], fp['cluster_min_samples'], fp['cluster_min_pts']
             )
 
-        tp, fp_val, fn = compute_metrics_accum(gt_mask, obs_mask)
+        tp, fp_val, fn = compute_metrics_accum(gt_mask, obs_mask, valid_mask)
         total_tp += tp
         total_fp += fp_val
         total_fn += fn
@@ -285,7 +292,7 @@ def _eval_no_wall_baseline(dummy):
     pipeline = LidarPipelineSuite(config)
 
     total_tp, total_fp, total_fn = 0, 0, 0
-    for seq, scan_id, pts, gt_mask in _GLOBAL_DATA:
+    for seq, scan_id, pts, gt_mask, valid_mask in _GLOBAL_DATA:
         result = pipeline.stage2_complete(pts)
         obs_mask = result['obs_mask']
 
@@ -295,7 +302,7 @@ def _eval_no_wall_baseline(dummy):
                 fp['cluster_eps'], fp['cluster_min_samples'], fp['cluster_min_pts']
             )
 
-        tp, fp_val, fn = compute_metrics_accum(gt_mask, obs_mask)
+        tp, fp_val, fn = compute_metrics_accum(gt_mask, obs_mask, valid_mask)
         total_tp += tp
         total_fp += fp_val
         total_fn += fn

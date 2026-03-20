@@ -1,6 +1,6 @@
 # LiDAR Obstacle Detection Pipeline
 
-Sistema de deteccion de obstaculos 3D basado en LiDAR para navegación autónoma. Pipeline de 3 etapas que opera sin GPU y sin entrenamiento, usando geometria 3D pura. Evaluado con ground truth de SemanticKITTI.
+Sistema de deteccion de obstaculos 3D basado en LiDAR para navegación autónoma. Combina Patchwork++ con rechazo hibrido de paredes para segmentacion de suelo mejorada. Opera sin GPU y sin entrenamiento, usando geometria 3D pura. Evaluado con ground truth de SemanticKITTI.
 
 **Tipo**: Trabajo de Fin de Grado (TFG)
 **Lenguaje**: Python (comentarios en español)
@@ -8,19 +8,19 @@ Sistema de deteccion de obstaculos 3D basado en LiDAR para navegación autónoma
 
 ---
 
-## Pipeline: 3 Etapas
+## Pipeline Optimo: Patchwork++ + Wall Rejection
 
 ```
 Point Cloud (128k puntos, Velodyne HDL-64E)
        |
-  [Stage 1] Ground Segmentation (Patchwork++ + Wall Rejection)
+  [Stage 1] Ground Segmentation (Patchwork++ + Wall Rejection hibrido)
        |
-  [Stage 2] Delta-r Anomaly Detection
+  non-ground = obstaculo
        |
-  [Stage 3] DBSCAN Cluster Filtering
-       |
-  Output: obs_mask (N,), likelihood (N,), cluster_labels (N,)
+  Output: obs_mask (N,) bool    F1=93.44%  ~41 ms/frame
 ```
+
+El ablation study demostro que la segmentacion de suelo mejorada es suficiente: non-ground = obstaculo alcanza F1=93.44% sin stages adicionales. Stages 2 (delta-r) y 3 (DBSCAN) fueron evaluados y descartados (ver ablation study).
 
 ### Stage 1: Segmentacion de Suelo + Rechazo de Paredes
 
@@ -28,37 +28,26 @@ Separa los puntos ground de los non-ground.
 
 - **Patchwork++ (submodulo C++)**: Divide el espacio polar en 4 zonas concentricas (CZM). Para cada bin, ajusta un plano local con RANSAC. Un punto es ground si su distancia al plano es menor que el umbral (`th_dist = 0.2m`).
 
-- **Rechazo hibrido de paredes**: Patchwork++ clasifica mal las bases de paredes y objetos verticales como suelo. Se corrige en dos fases:
+- **Rechazo hibrido de paredes (contribucion original)**: Patchwork++ clasifica mal las bases de paredes y objetos verticales como suelo. Se corrige en dos fases:
   - Fase 1 (bin-wise): Si la normal del plano tiene `nz < 0.9`, el bin es sospechoso de ser pared
   - Fase 2 (point-wise): Voxel grid 2D (celdas 1.0m) con percentiles P95-P5 vectorizados. Rechaza puntos individuales con `delta_Z > 0.2m`. Optimizado de KDTree (2300ms) a voxel grid (74ms) con resultados equivalentes
+  - **Impacto**: +2.27% F1 sobre Patchwork++ vanilla (91.17% → 93.44%)
 
 **Metodo principal**: `stage1_complete(points)`
 
-### Stage 2: Deteccion de Anomalias Delta-r
+### Stages evaluados y descartados
 
-Clasifica cada punto comparando el rango medido con el rango esperado por el plano local:
+#### Delta-r Anomaly Detection (Stage 2, descartado)
 
-```
-delta_r = r_medido - r_esperado
-r_esperado = -d / (n · direccion_rayo)
+Clasifica cada punto comparando el rango medido con el rango esperado por el plano local. **Resultado**: empeora F1 en -0.77% (93.44% → 92.67%) porque planos ruidosos generan falsos positivos y reclasifica detecciones correctas de PW++ como ground.
 
-Si delta_r < -0.4m  →  OBSTACULO (algo bloquea el rayo antes del plano)
-Si delta_r > +1.2m  →  VOID (hueco o depresion)
-Si intermedio       →  GROUND normal
-```
+#### DBSCAN Cluster Filtering (Stage 3, descartado)
 
-**Metodo principal**: `stage2_complete(points)` (ejecuta Stage 1 + delta-r)
+Filtra obstaculos dispersos con DBSCAN voxelizado. **Resultado**: F1=93.41% (sin delta-r) o 93.24% (con delta-r), ambos peores que WR solo (93.44%), y anade ~80ms de latencia.
 
-### Stage 3: Filtrado por Clustering DBSCAN
+#### Filtro Temporal Bayesiano (descartado)
 
-Los obstaculos reales forman clusters densos (coche ~200 pts, persona ~50 pts). Los falsos positivos son puntos dispersos sin estructura espacial.
-
-- Voxel downsampling (celdas 0.24m) antes de DBSCAN: reduce ~30k puntos a ~5k voxels centroides
-- DBSCAN (eps=0.8m, min_samples=6) sobre voxels — parametros optimizados via grid search en SemanticKITTI (2880 combinaciones, train/val split)
-- Clusters con >= 30 puntos originales → obstaculo real (se mantiene)
-- Clusters pequenos o ruido → FP probable (se elimina)
-
-**Metodo principal**: `stage3_cluster_filtering(points, stage2_result)` o `stage3_complete(points)` (pipeline completo)
+Basado en Dewan et al. **Resultado**: F1 baja a 88.2%. Disenado para ruido transitorio (lluvia/polvo) que no existe en KITTI.
 
 ---
 
@@ -101,18 +90,17 @@ Topics publicados: `/stage1_cloud`, `/stage2_cloud`, `/stage3_cloud`, `/gt_cloud
 ```python
 from lidar_pipeline_suite import LidarPipelineSuite, PipelineConfig
 
-config = PipelineConfig(verbose=True)
+config = PipelineConfig(enable_hybrid_wall_rejection=True, verbose=True)
 pipeline = LidarPipelineSuite(config)
 
-# Single frame (Stage 2 solo)
-result = pipeline.stage2_complete(points)
+# Pipeline optimo: Stage 1 (PW++ + WR) → non-ground = obstaculo
+result = pipeline.stage1_complete(points)
+obs_mask = np.zeros(len(points), dtype=bool)
+obs_mask[result['nonground_indices']] = True
 
-# Pipeline completo (Stage 1 + 2 + 3 DBSCAN)
+# Pipeline completo con todos los stages (para comparacion)
 result = pipeline.stage3_complete(points)
-
 obs_mask = result['obs_mask']          # (N,) bool
-likelihood = result['likelihood']      # (N,) log-odds
-clusters = result['cluster_labels']    # (N,) int
 ```
 
 ---
@@ -127,6 +115,7 @@ cd ~/lidar_ws/TFG-LiDAR-Geometry/sota_idea
 
 | Test | Comando | Que mide |
 |------|---------|----------|
+| **Ablation SemanticKITTI** | `python3 tests/test_stage_ablation_semantickitti.py --stride 5` | Ablation incremental en val (seq 08): PW++ → +WR → +delta-r → +DBSCAN |
 | **Grid search delta-r + DBSCAN** | `python3 tests/test_delta_r_dbscan_grid_search.py --mode full --workers 128 --stride 5` | Busca threshold_obs/void + eps/min_samples/min_pts optimos (2880 combos, train/val split) |
 | **Grid search wall rejection** | `python3 tests/test_wall_rejection_grid_search.py --workers 128 --stride 5` | Busca slope/dz/radius optimos (100 combos, train/val split) |
 | **Ablation completo** | `python3 tests/test_full_ablation.py --seq both --n_frames 10` | Contribucion de cada stage (acumulativo) |
@@ -148,14 +137,21 @@ Parametros optimizados con grid search riguroso (protocolo SemanticKITTI: train 
 - **Wall Rejection**: 100 combinaciones (5 slope × 5 dz × 4 radius)
 - Sin overfitting: mismos parametros optimos en train y val
 
-### Resultados en Val (seq 08) — resultado reportable
+### Ablation Study en Val (seq 08, 815 frames stride=5)
 
-| Configuracion | F1 | IoU | P | R |
-|---------------|------|------|------|------|
-| PW++ vanilla (sin wall rejection) | 91.94% | 85.07% | — | — |
-| + Wall Rejection (slope=0.9, dz=0.2, r=0.3) | 92.20% | 85.53% | 90.34% | 94.14% |
-| + delta-r optimizado (thr_obs=-0.4, thr_void=1.2) | 92.20% | 85.53% | 90.34% | 94.14% |
-| **+ DBSCAN (eps=0.8, ms=12, mp=30) — pipeline final** | **93.25%** | **87.35%** | **91.18%** | **95.41%** |
+| Configuracion | F1 | IoU | P | R | ms/frame |
+|---------------|------|------|------|------|----------|
+| PW++ vanilla (non-ground = obstaculo) | 91.17% | 83.81% | 94.38% | 88.18% | 32.1 |
+| **PW++ + Wall Rejection (pipeline optimo)** | **93.44%** | **87.68%** | **91.23%** | **95.75%** | **40.8** |
+| PW++ + WR + delta-r | 92.67% | 86.34% | 88.90% | 96.77% | 46.3 |
+| PW++ + WR + DBSCAN (sin delta-r) | 93.41% | 87.64% | 92.44% | 94.41% | 121.0 |
+| PW++ + WR + delta-r + DBSCAN | 93.24% | 87.35% | 91.16% | 95.42% | 134.5 |
+
+**Conclusiones del ablation:**
+- Wall Rejection aporta **+2.27% F1** sobre PW++ vanilla (contribucion principal)
+- Delta-r **empeora** F1 en -0.77%: planos ruidosos generan FPs, reclasifica detecciones correctas
+- DBSCAN no mejora sobre WR solo y anade ~80ms de latencia
+- Pipeline optimo: **PW++ + WR** (F1=93.44%, 41ms, tiempo real a 24 Hz)
 
 ### Parametros optimos (grid search)
 
@@ -164,19 +160,16 @@ Parametros optimizados con grid search riguroso (protocolo SemanticKITTI: train 
 | wall_rejection_slope | 0.9 | Stage 1 |
 | wall_height_diff_threshold | 0.2 m | Stage 1 |
 | wall_kdtree_radius | 0.3 m | Stage 1 |
-| threshold_obs | -0.4 m | Stage 2 |
-| threshold_void | 1.2 m | Stage 2 |
-| cluster_eps | 0.8 m | Stage 3 |
-| cluster_min_samples | 12 | Stage 3 |
-| cluster_min_pts | 30 | Stage 3 |
 
 ### Stages descartados tras ablation study
 
-| Configuracion descartada | Media F1 | Motivo |
-|--------------------------|----------|--------|
-| Stage 2 → Bayes | 87.4% | Inercia temporal retrasa deteccion, genera fantasmas. Solo util con ruido transitorio (lluvia/polvo) que no existe en KITTI |
-| Stage 2 → Bayes → DBSCAN | 88.2% | Bayes sigue empeorando respecto a Stage 2 → DBSCAN directo |
-| Stage 2 → Bayes → Shadow → DBSCAN | 88.5% | Shadow apenas aporta (+0.3%), no justifica coste computacional |
+| Configuracion descartada | F1 (val) | Delta vs WR solo | Motivo |
+|--------------------------|----------|-------------------|--------|
+| + delta-r (thr_obs=-0.4, thr_void=1.2) | 92.67% | -0.77% | Planos ruidosos en bins con pocos puntos generan FPs. Reclasifica non-ground correctos como ground |
+| + DBSCAN (eps=0.8, ms=12, mp=30) | 93.41% | -0.03% | No mejora, anade 80ms latencia |
+| + delta-r + DBSCAN | 93.24% | -0.20% | DBSCAN compensa parcialmente el dano de delta-r pero no recupera |
+| + Bayes temporal | 88.2% | -5.24% | Inercia temporal retrasa deteccion, genera fantasmas. Solo util con ruido transitorio (lluvia/polvo) que no existe en KITTI |
+| + Shadow (OccAM) | ~88.5% | — | Shadow apenas aporta (+0.3%), no justifica coste computacional |
 
 Ver `lidar_pipeline_suite_with_bayes.py` para la version con filtro Bayesiano.
 
@@ -196,7 +189,15 @@ Ver `lidar_pipeline_suite_with_bayes.py` para la version con filtro Bayesiano.
 
 **Causa**: El filtro fue disenado para filtrar ruido transitorio (polvo, lluvia, humo) que no existe en KITTI (buen tiempo). La inercia temporal introduce retraso en deteccion y persistencia fantasma sin beneficio compensatorio.
 
-**Decision**: Eliminar Bayes del pipeline principal. Pipeline optimo: Stage 2 → DBSCAN directo (F1=90.8%). Version con Bayes preservada en `lidar_pipeline_suite_with_bayes.py`.
+**Decision**: Eliminar Bayes del pipeline principal. Version con Bayes preservada en `lidar_pipeline_suite_with_bayes.py`.
+
+### 3. Delta-r Anomaly Detection Empeora el Pipeline
+
+**Problema**: Se implemento deteccion de anomalias por rango (delta_r = r_medido - r_esperado) usando los planos locales de Patchwork++. Tras grid search de 36 combinaciones de umbrales (threshold_obs × threshold_void), la mejor configuracion empeora F1 en -0.77% (93.44% → 92.67%).
+
+**Causa**: Los planos RANSAC de Patchwork++ son ruidosos, especialmente en bins con pocos puntos o en bordes de objetos. Esto genera r_esperado incorrecto, creando falsos positivos. Ademas, delta-r reclasifica puntos non-ground correctos (de PW++) como "ground normal" cuando su delta-r cae entre los umbrales.
+
+**Decision**: Pipeline optimo es PW++ + Wall Rejection sin delta-r (non-ground = obstaculo). F1=93.44%, 41ms/frame.
 
 
 ## Comparacion con Papers Base
@@ -220,9 +221,9 @@ Evaluacion en SemanticKITTI seq 08 (val), metrica binaria obstaculo/no-obstaculo
 | Metodo | Tipo | F1 (val) | IoU (val) | GPU | Entrenamiento |
 |--------|------|----------|-----------|-----|---------------|
 | RANSAC baseline | Geom. | pendiente | pendiente | No | No |
-| Patchwork++ vanilla | Geom. | 91.94% | 85.07% | No | No |
+| Patchwork++ vanilla | Geom. | 91.17% | 83.81% | No | No |
 | GroundGrid | Geom. | pendiente | pendiente | No | No |
-| **Este trabajo** | **Geom.** | **93.25%** | **87.35%** | **No** | **No** |
+| **Este trabajo (PW++ + WR)** | **Geom.** | **93.44%** | **87.68%** | **No** | **No** |
 | RangeNet++ | DL | pendiente | pendiente | Si | Si |
 | Cylinder3D | DL | pendiente | pendiente | Si | Si |
 
@@ -239,6 +240,7 @@ sota_idea/
 ├── stage1_visualizer.py                # Visualizacion Stage 1 aislado
 │
 ├── tests/
+│   ├── test_stage_ablation_semantickitti.py  # Ablation incremental protocolo SemanticKITTI (val seq 08)
 │   ├── test_full_ablation.py           # Ablation acumulativo por stages
 │   ├── test_stage1_ablation.py         # PW++ vanilla vs Wall Rejection + timing
 │   ├── test_delta_r_dbscan_grid_search.py  # Grid search delta-r + DBSCAN (paralelo, train/val)

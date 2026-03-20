@@ -40,8 +40,11 @@ def load_kitti_scan(scan_id: int, seq: str = '04'):
     return points, semantic_labels
 
 
-def compute_detection_metrics(gt_mask, pred_mask):
+def compute_detection_metrics(gt_mask, pred_mask, valid_mask=None):
     """Precision, Recall, F1"""
+    if valid_mask is not None:
+        gt_mask = gt_mask & valid_mask
+        pred_mask = pred_mask & valid_mask
     tp = np.sum(gt_mask & pred_mask)
     fp = np.sum((~gt_mask) & pred_mask)
     fn = np.sum(gt_mask & (~pred_mask))
@@ -56,20 +59,30 @@ def compute_detection_metrics(gt_mask, pred_mask):
     }
 
 
+IGNORE_LABELS = [0, 1, 52, 99]  # learning_map → 0 en SemanticKITTI
+
+
 def get_gt_obstacle_mask(semantic_labels):
-    """Máscara de obstáculos según SemanticKITTI semantic-kitti.yaml"""
+    """Máscara de obstáculos según SemanticKITTI (NO 52/99=ignored)"""
     obstacle_labels = [
-        10, 11, 13, 15, 16, 18, 20,  # Vehicles (car, bicycle, bus, motorcycle, on-rails, truck, other-vehicle)
-        30, 31, 32,                    # Persons (person, bicyclist, motorcyclist)
-        50, 51, 52,                    # Structures (building, fence, other-structure)
-        70, 71,                        # Vegetation (vegetation, trunk) — NO 72 (terrain = ground)
-        80, 81,                        # Poles/signs (pole, traffic-sign)
-        99,                            # other-object
-        252, 253, 254, 255, 256, 257, 258, 259  # Moving (car, person, bicyclist, etc.)
+        10, 11, 13, 15, 16, 18, 20,  # Vehicles
+        30, 31, 32,                    # Persons
+        50, 51,                        # Structures (NO 52=other-structure)
+        70, 71,                        # Vegetation (NO 72=terrain)
+        80, 81,                        # Poles/signs
+        252, 253, 254, 255, 256, 257, 258, 259  # Moving
     ]
     mask = np.zeros(len(semantic_labels), dtype=bool)
     for label in obstacle_labels:
         mask |= (semantic_labels == label)
+    return mask
+
+
+def get_valid_mask(semantic_labels):
+    """Máscara de puntos válidos (excluye unlabeled, outlier, other-structure, other-object)"""
+    mask = np.ones(len(semantic_labels), dtype=bool)
+    for label in IGNORE_LABELS:
+        mask &= (semantic_labels != label)
     return mask
 
 
@@ -104,6 +117,7 @@ def test_sequence(seq: str, scan_start: int, n_frames: int):
     # Frame de referencia
     points_ref, labels_ref = load_kitti_scan(scan_start, seq)
     gt_mask = get_gt_obstacle_mask(labels_ref)
+    valid_mask = get_valid_mask(labels_ref)
     print(f"  Frame referencia (scan {scan_start}): {len(points_ref)} pts, {gt_mask.sum()} obstacles GT")
     print()
 
@@ -121,7 +135,7 @@ def test_sequence(seq: str, scan_start: int, n_frames: int):
         verbose=False
     ))
     result_s2 = pipeline_s2.stage2_complete(points_ref)
-    metrics_s2 = compute_detection_metrics(gt_mask, result_s2['obs_mask'])
+    metrics_s2 = compute_detection_metrics(gt_mask, result_s2['obs_mask'], valid_mask)
     print_metrics("Stage 2", metrics_s2, result_s2['timing_total_ms'])
     results['stage2'] = metrics_s2
     print()
@@ -148,7 +162,7 @@ def test_sequence(seq: str, scan_start: int, n_frames: int):
     n_removed = result_s3.get('n_cluster_total_removed', 0)
     print(f"  {result_s3['obs_mask'].sum()} obs | {n_clusters} clusters | {n_removed} pts removed")
 
-    metrics_s3 = compute_detection_metrics(gt_mask, result_s3['obs_mask'])
+    metrics_s3 = compute_detection_metrics(gt_mask, result_s3['obs_mask'], valid_mask)
     print_metrics("Stage 3", metrics_s3, result_s3.get('timing_total_ms'))
     print(f"    Stage 3 timing: {result_s3.get('timing_stage3_ms', 0):.1f} ms")
     print(f"    Clusters: {result_s3.get('n_clusters', 0)} valid | {result_s3.get('n_clusters_rejected', 0)} rejected")
@@ -175,7 +189,7 @@ def test_sequence(seq: str, scan_start: int, n_frames: int):
 
         result_abl = pipeline_abl.stage3_complete(points_ref)
 
-        m = compute_detection_metrics(gt_mask, result_abl['obs_mask'])
+        m = compute_detection_metrics(gt_mask, result_abl['obs_mask'], valid_mask)
         fp_vs_s2 = results['stage2']['fp'] - m['fp']
         recall_loss = 100 * (results['stage2']['recall'] - m['recall'])
         print(f"  min_pts={min_pts:>3}: P={100*m['precision']:.1f}% R={100*m['recall']:.1f}% F1={100*m['f1']:.1f}% | FP removed: {fp_vs_s2} | Recall loss: {recall_loss:.2f}%")

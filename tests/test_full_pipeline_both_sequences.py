@@ -40,8 +40,9 @@ LABEL_NAMES = {
 }
 
 GROUND_LABELS = {40, 44, 48, 49, 60, 72}
-OBSTACLE_LABELS = {10,11,13,15,16,18,20,30,31,32,50,51,52,70,71,80,81,99,
+OBSTACLE_LABELS = {10,11,13,15,16,18,20,30,31,32,50,51,70,71,80,81,
                    252,253,254,255,256,257,258,259}
+IGNORE_LABELS = {0, 1, 52, 99}  # learning_map → 0 en SemanticKITTI
 CRITICAL_LABELS = {10, 13, 15, 18, 20, 30, 31, 32, 252, 253, 254, 255, 257, 258, 259}
 
 from data_paths import get_sequence_info, get_scan_file, get_label_file, get_velodyne_dir, get_labels_dir, get_poses_file
@@ -101,11 +102,18 @@ def get_gt_masks(semantic_labels):
     for l in CRITICAL_LABELS:
         gt_critical |= (semantic_labels == l)
 
-    return gt_ground, gt_obstacle, gt_critical
+    valid_mask = np.ones(len(semantic_labels), dtype=bool)
+    for l in IGNORE_LABELS:
+        valid_mask &= (semantic_labels != l)
+
+    return gt_ground, gt_obstacle, gt_critical, valid_mask
 
 
-def compute_metrics(gt_mask, pred_mask):
+def compute_metrics(gt_mask, pred_mask, valid_mask=None):
     """Precision, Recall, F1"""
+    if valid_mask is not None:
+        gt_mask = gt_mask & valid_mask
+        pred_mask = pred_mask & valid_mask
     tp = int(np.sum(gt_mask & pred_mask))
     fp = int(np.sum((~gt_mask) & pred_mask))
     fn = int(np.sum(gt_mask & (~pred_mask)))
@@ -128,7 +136,7 @@ def test_stage1_patchwork(seq_id, scan_id=0):
     print(f"{'='*80}")
 
     points, semantic_labels = load_scan(seq_id, scan_id)
-    gt_ground, gt_obstacle, gt_critical = get_gt_masks(semantic_labels)
+    gt_ground, gt_obstacle, gt_critical, valid_mask = get_gt_masks(semantic_labels)
 
     print(f"Total puntos: {len(points)}")
     print(f"GT ground: {np.sum(gt_ground)} ({100*np.mean(gt_ground):.1f}%)")
@@ -259,7 +267,7 @@ def test_stage2(seq_id, scan_id=0):
     print(f"{'='*80}")
 
     points, semantic_labels = load_scan(seq_id, scan_id)
-    gt_ground, gt_obstacle, gt_critical = get_gt_masks(semantic_labels)
+    gt_ground, gt_obstacle, gt_critical, valid_mask = get_gt_masks(semantic_labels)
 
     config = PipelineConfig(
         enable_hybrid_wall_rejection=True,
@@ -268,7 +276,7 @@ def test_stage2(seq_id, scan_id=0):
     pipeline = LidarPipelineSuite(config)
     result = pipeline.stage2_complete(points)
 
-    metrics = compute_metrics(gt_obstacle, result['obs_mask'])
+    metrics = compute_metrics(gt_obstacle, result['obs_mask'], valid_mask)
 
     print(f"Obstacles detectados: {np.sum(result['obs_mask'])}")
     print(f"GT obstacles: {np.sum(gt_obstacle)}")
@@ -312,7 +320,7 @@ def test_stage3(seq_id, scan_id=0):
     print(f"{'='*80}")
 
     points, semantic_labels = load_scan(seq_id, scan_id)
-    gt_ground, gt_obstacle, gt_critical = get_gt_masks(semantic_labels)
+    gt_ground, gt_obstacle, gt_critical, valid_mask = get_gt_masks(semantic_labels)
 
     config = PipelineConfig(
         enable_hybrid_wall_rejection=True,
@@ -325,7 +333,7 @@ def test_stage3(seq_id, scan_id=0):
     pipeline = LidarPipelineSuite(config)
     result = pipeline.stage3_complete(points)
 
-    metrics = compute_metrics(gt_obstacle, result['obs_mask'])
+    metrics = compute_metrics(gt_obstacle, result['obs_mask'], valid_mask)
 
     print(f"Obstacles detectados: {np.sum(result['obs_mask'])}")
     print(f"GT obstacles: {np.sum(gt_obstacle)}")

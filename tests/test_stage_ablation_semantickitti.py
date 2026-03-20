@@ -38,9 +38,12 @@ SEMANTICKITTI_VAL = ['08']
 
 OBSTACLE_LABELS = np.array([
     10, 11, 13, 15, 16, 18, 20, 30, 31, 32,
-    50, 51, 52, 70, 71, 80, 81, 99,
+    50, 51, 70, 71, 80, 81,
     252, 253, 254, 255, 256, 257, 258, 259
 ], dtype=np.uint32)
+
+# Labels ignorados en evaluación (learning_map → 0 en SemanticKITTI)
+IGNORE_LABELS = np.array([0, 1, 52, 99], dtype=np.uint32)
 
 
 def discover_scan_ids(seq, stride=1):
@@ -61,7 +64,8 @@ def load_scan(scan_id, seq):
     labels = np.fromfile(label_file, dtype=np.uint32)
     semantic_labels = labels & 0xFFFF
     gt_mask = np.isin(semantic_labels, OBSTACLE_LABELS)
-    return points, gt_mask
+    valid_mask = ~np.isin(semantic_labels, IGNORE_LABELS)
+    return points, gt_mask, valid_mask
 
 
 def compute_metrics(gt_mask, pred_mask):
@@ -200,8 +204,8 @@ def main():
         t0 = time.time()
         print(f"  Seq {seq}: {len(scan_ids)} frames...", end=" ", flush=True)
         for scan_id in scan_ids:
-            pts, gt_mask = load_scan(scan_id, seq)
-            frames.append((pts, gt_mask))
+            pts, gt_mask, valid_mask = load_scan(scan_id, seq)
+            frames.append((pts, gt_mask, valid_mask))
         print(f"OK ({time.time()-t0:.1f}s)")
 
     print(f"\n  Total: {len(frames)} frames")
@@ -218,7 +222,7 @@ def main():
         total_tp, total_fp, total_fn = 0, 0, 0
         total_time_ms = 0
 
-        for i, (pts, gt_mask) in enumerate(frames):
+        for i, (pts, gt_mask, valid_mask) in enumerate(frames):
             t0 = time.time()
 
             if config_name == 'PW++ vanilla':
@@ -263,9 +267,12 @@ def main():
             t_ms = (time.time() - t0) * 1000.0
             total_time_ms += t_ms
 
-            tp, fp, fn = int(np.sum(gt_mask & pred_mask)), \
-                         int(np.sum((~gt_mask) & pred_mask)), \
-                         int(np.sum(gt_mask & (~pred_mask)))
+            # Solo evaluar en puntos válidos (excluir unlabeled, outlier, 52, 99)
+            gt_v = gt_mask & valid_mask
+            pred_v = pred_mask & valid_mask
+            tp, fp, fn = int(np.sum(gt_v & pred_v)), \
+                         int(np.sum((~gt_v) & pred_v)), \
+                         int(np.sum(gt_v & (~pred_v)))
             total_tp += tp
             total_fp += fp
             total_fn += fn

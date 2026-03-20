@@ -37,7 +37,10 @@ def load_kitti_scan(scan_id: int, seq: str):
     return points, semantic_labels
 
 
-def compute_metrics(gt_mask, pred_mask):
+def compute_metrics(gt_mask, pred_mask, valid_mask=None):
+    if valid_mask is not None:
+        gt_mask = gt_mask & valid_mask
+        pred_mask = pred_mask & valid_mask
     tp = np.sum(gt_mask & pred_mask)
     fp = np.sum((~gt_mask) & pred_mask)
     fn = np.sum(gt_mask & (~pred_mask))
@@ -49,20 +52,30 @@ def compute_metrics(gt_mask, pred_mask):
             'tp': int(tp), 'fp': int(fp), 'fn': int(fn)}
 
 
+IGNORE_LABELS = [0, 1, 52, 99]  # learning_map → 0 en SemanticKITTI
+
+
 def get_gt_obstacle_mask(semantic_labels):
-    """SemanticKITTI obstacle labels (NO 72=terrain, SI 252-259=moving)"""
+    """SemanticKITTI obstacle labels (NO 72=terrain, NO 52/99=ignored, SI 252-259=moving)"""
     obstacle_labels = [
         10, 11, 13, 15, 16, 18, 20,  # Vehicles
         30, 31, 32,                    # Persons
-        50, 51, 52,                    # Structures
+        50, 51,                        # Structures (NO 52=other-structure)
         70, 71,                        # Vegetation (NO 72=terrain)
         80, 81,                        # Poles/signs
-        99,                            # other-object
         252, 253, 254, 255, 256, 257, 258, 259  # Moving objects
     ]
     mask = np.zeros(len(semantic_labels), dtype=bool)
     for label in obstacle_labels:
         mask |= (semantic_labels == label)
+    return mask
+
+
+def get_valid_mask(semantic_labels):
+    """Máscara de puntos válidos (excluye unlabeled, outlier, other-structure, other-object)"""
+    mask = np.ones(len(semantic_labels), dtype=bool)
+    for label in IGNORE_LABELS:
+        mask &= (semantic_labels != label)
     return mask
 
 
@@ -150,6 +163,7 @@ def test_sequence(seq, scan_start, n_frames):
     scan_ref = scan_start + n_frames - 1
     _, labels_ref = load_kitti_scan(scan_ref, seq)
     gt_mask = get_gt_obstacle_mask(labels_ref)
+    valid_mask = get_valid_mask(labels_ref)
 
     print("=" * 90)
     print(f"SECUENCIA {seq} | Frames {scan_start}-{scan_ref} ({n_frames} frames) | GT obstacles: {gt_mask.sum()}")
@@ -164,7 +178,7 @@ def test_sequence(seq, scan_start, n_frames):
         t0 = time.time()
 
         result, timings = run_config(name, config, seq, scan_start, n_frames, poses)
-        metrics = compute_metrics(gt_mask, result['obs_mask'])
+        metrics = compute_metrics(gt_mask, result['obs_mask'], valid_mask)
 
         all_metrics[name] = metrics
         all_timings[name] = timings

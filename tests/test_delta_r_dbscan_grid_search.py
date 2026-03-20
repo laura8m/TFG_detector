@@ -95,21 +95,32 @@ def load_kitti_scan(scan_id: int, seq: str):
 OBSTACLE_LABELS = np.array([
     10, 11, 13, 15, 16, 18, 20,
     30, 31, 32,
-    50, 51, 52,
+    50, 51,
     70, 71,
     80, 81,
-    99,
     252, 253, 254, 255, 256, 257, 258, 259
 ], dtype=np.uint32)
 
+# Labels ignorados en evaluación (learning_map → 0 en SemanticKITTI)
+IGNORE_LABELS = np.array([0, 1, 52, 99], dtype=np.uint32)
+
 
 def get_gt_obstacle_mask(semantic_labels):
-    """SemanticKITTI obstacle labels (NO 72=terrain, SI 252-259=moving)"""
+    """SemanticKITTI obstacle labels (NO 72=terrain, NO 52/99=ignored, SI 252-259=moving)"""
     return np.isin(semantic_labels, OBSTACLE_LABELS)
 
 
-def compute_metrics_accum(gt_mask, pred_mask):
-    """Retorna tp, fp, fn como enteros para acumulación."""
+def get_valid_mask(semantic_labels):
+    """Máscara de puntos válidos para evaluación (excluye unlabeled, outlier, other-structure, other-object)"""
+    return ~np.isin(semantic_labels, IGNORE_LABELS)
+
+
+def compute_metrics_accum(gt_mask, pred_mask, valid_mask=None):
+    """Retorna tp, fp, fn como enteros para acumulación.
+    Si valid_mask se proporciona, solo evalúa puntos válidos (excluye unlabeled/outlier/52/99)."""
+    if valid_mask is not None:
+        gt_mask = gt_mask & valid_mask
+        pred_mask = pred_mask & valid_mask
     tp = int(np.sum(gt_mask & pred_mask))
     fp = int(np.sum((~gt_mask) & pred_mask))
     fn = int(np.sum(gt_mask & (~pred_mask)))
@@ -161,6 +172,7 @@ def precompute_stage1_and_delta_r(seq, scan_ids):
     for scan_id in scan_ids:
         pts, labels = load_kitti_scan(scan_id, seq)
         gt_mask = get_gt_obstacle_mask(labels)
+        valid_mask = get_valid_mask(labels)
 
         stage1_result = pipeline.stage1_complete(pts)
 
@@ -183,6 +195,7 @@ def precompute_stage1_and_delta_r(seq, scan_ids):
             'delta_r': delta_r,
             'rejected_wall_indices': wall_indices,
             'gt_mask': gt_mask,
+            'valid_mask': valid_mask,
             'n_points': N,
         })
 
@@ -219,7 +232,7 @@ def precompute_all_sequences(seqs, stride):
     t_total = time.time() - t0
     total_frames = len(all_frames)
     mem_mb = sum(
-        f['points'].nbytes + f['delta_r'].nbytes + f['gt_mask'].nbytes + f['rejected_wall_indices'].nbytes
+        f['points'].nbytes + f['delta_r'].nbytes + f['gt_mask'].nbytes + f['valid_mask'].nbytes + f['rejected_wall_indices'].nbytes
         for f in all_frames
     ) / 1e6
 
@@ -308,7 +321,7 @@ def _eval_delta_r_combo(args):
     total_tp, total_fp, total_fn = 0, 0, 0
     for frame in _GLOBAL_FRAMES:
         obs_mask = replay_delta_r_single(frame, threshold_obs, threshold_void)
-        tp, fp, fn = compute_metrics_accum(frame['gt_mask'], obs_mask)
+        tp, fp, fn = compute_metrics_accum(frame['gt_mask'], obs_mask, frame['valid_mask'])
         total_tp += tp
         total_fp += fp
         total_fn += fn
@@ -326,7 +339,7 @@ def _eval_full_combo(args):
     for frame in _GLOBAL_FRAMES:
         obs_mask = replay_delta_r_single(frame, threshold_obs, threshold_void)
         obs_filtered = replay_dbscan(frame['points'], obs_mask, eps, min_samples, min_pts)
-        tp, fp, fn = compute_metrics_accum(frame['gt_mask'], obs_filtered)
+        tp, fp, fn = compute_metrics_accum(frame['gt_mask'], obs_filtered, frame['valid_mask'])
         total_tp += tp
         total_fp += fp
         total_fn += fn
@@ -464,7 +477,7 @@ def compute_baselines(frames, current_thr_obs, current_thr_void,
     for f in frames:
         obs_mask = replay_delta_r_single(f, current_thr_obs, current_thr_void)
         obs_masks.append(obs_mask)
-        tp, fp, fn = compute_metrics_accum(f['gt_mask'], obs_mask)
+        tp, fp, fn = compute_metrics_accum(f['gt_mask'], obs_mask, f['valid_mask'])
         bl_tp += tp
         bl_fp += fp
         bl_fn += fn
@@ -477,7 +490,7 @@ def compute_baselines(frames, current_thr_obs, current_thr_void,
             f['points'], obs_masks[i],
             current_eps, current_min_samples, current_min_pts
         )
-        tp, fp, fn = compute_metrics_accum(f['gt_mask'], obs_filtered)
+        tp, fp, fn = compute_metrics_accum(f['gt_mask'], obs_filtered, f['valid_mask'])
         bld_tp += tp
         bld_fp += fp
         bld_fn += fn
