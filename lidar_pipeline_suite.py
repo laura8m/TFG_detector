@@ -2,7 +2,6 @@
 
 import sys
 import numpy as np
-from scipy.spatial import cKDTree
 from sklearn.cluster import DBSCAN
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -450,7 +449,7 @@ class LidarPipelineSuite:
                 suspect_bins.append(bid)
                 suspect_bin_masks[bid] = mask
 
-        # --- Fase 3: Refinamiento punto a punto en bins sospechosos ---
+        # --- Fase 3: Refinamiento punto a punto con voxel grid (O(N)) ---
 
         rejected_mask = np.zeros(len(ground_pts), dtype=bool)
 
@@ -461,34 +460,52 @@ class LidarPipelineSuite:
             ])
 
             if len(suspect_indices) > 0:
-                try:
-                    # KDTree sobre todos los ground points para búsqueda de vecindad
-                    tree = cKDTree(ground_pts)
+                # Voxel grid 2D (XY): celdas de 1.0m (= diámetro del radio KDTree)
+                # Cada celda tiene ~20-40 puntos → percentiles robustos sin vecinos
+                cell_size = kdtree_radius * 2.0
+                vox_x = np.floor(ground_pts[:, 0] / cell_size).astype(np.int64)
+                vox_y = np.floor(ground_pts[:, 1] / cell_size).astype(np.int64)
+                gz = ground_pts[:, 2]
 
-                    # Búsqueda vectorizada de vecinos en radio fijo
-                    suspect_pts = ground_pts[suspect_indices]
-                    neighbor_lists = tree.query_ball_point(suspect_pts, r=kdtree_radius, workers=-1)
+                # Hash espacial → clave única por celda
+                voxel_key = vox_x * 100003 + vox_y
 
-                    # Analizar delta_z de cada vecindad
-                    for i, neighbors in enumerate(neighbor_lists):
-                        if len(neighbors) >= min_neighbors:
-                            neighbor_z = ground_pts[neighbors, 2]
+                # Ordenar por clave de voxel para agrupar z values
+                sort_idx = np.argsort(voxel_key)
+                sorted_keys = voxel_key[sort_idx]
+                sorted_z = gz[sort_idx].copy()
 
-                            if use_percentiles:
-                                z_high = np.percentile(neighbor_z, 95)
-                                z_low = np.percentile(neighbor_z, 5)
-                                delta_z = z_high - z_low
-                            else:
-                                delta_z = neighbor_z.max() - neighbor_z.min()
+                # Límites de cada grupo (voxel)
+                change_idx = np.where(np.diff(sorted_keys) != 0)[0] + 1
+                group_starts = np.concatenate([[0], change_idx])
+                group_ends = np.concatenate([change_idx, [len(sorted_keys)]])
+                unique_keys = sorted_keys[group_starts]
+                counts = group_ends - group_starts
 
-                            if delta_z > delta_z_threshold:
-                                rejected_mask[suspect_indices[i]] = True
+                # Ordenar z dentro de cada grupo para indexar percentiles
+                for i in range(len(group_starts)):
+                    s, e = group_starts[i], group_ends[i]
+                    sorted_z[s:e] = np.sort(sorted_z[s:e])
 
-                except Exception as e:
-                    print(f"[WARN] Análisis KDTree falló: {e}. Usando rechazo por bins como alternativa.")
-                    for bid in suspect_bins:
-                        mask = suspect_bin_masks[bid]
-                        rejected_mask |= mask
+                # P5 y P95 por voxel (indexar en z ordenado)
+                p5_idx = np.clip((0.05 * (counts - 1)).astype(np.int32), 0, counts - 1)
+                p95_idx = np.clip((0.95 * (counts - 1)).astype(np.int32), 0, counts - 1)
+                voxel_p5 = sorted_z[group_starts + p5_idx]
+                voxel_p95 = sorted_z[group_starts + p95_idx]
+
+                # Lookup vectorizado: cada sospechoso → su celda (sin vecinos)
+                suspect_keys = vox_x[suspect_indices] * 100003 + vox_y[suspect_indices]
+
+                positions = np.searchsorted(unique_keys, suspect_keys)
+                positions = np.clip(positions, 0, len(unique_keys) - 1)
+                valid = unique_keys[positions] == suspect_keys
+
+                # Decisión vectorizada: P95-P5 > umbral y suficientes puntos
+                delta_z_local = np.where(valid, voxel_p95[positions] - voxel_p5[positions], 0.0)
+                enough_pts = np.where(valid, counts[positions] >= min_neighbors, False)
+
+                rejected_suspects = enough_pts & (delta_z_local > delta_z_threshold)
+                rejected_mask[suspect_indices[rejected_suspects]] = True
 
         rejected_indices = ground_indices[rejected_mask]
         return rejected_indices if len(rejected_indices) > 0 else np.array([], dtype=np.int32)
