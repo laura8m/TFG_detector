@@ -164,6 +164,13 @@ def main():
             threshold_void=1.2,
             verbose=False,
         ),
+        'PW++ + WR + DBSCAN': PipelineConfig(
+            enable_hybrid_wall_rejection=True,
+            wall_rejection_slope=0.9,
+            wall_height_diff_threshold=0.2,
+            wall_kdtree_radius=0.3,
+            verbose=False,
+        ),
         'PW++ + WR + delta-r + DBSCAN': PipelineConfig(
             enable_hybrid_wall_rejection=True,
             wall_rejection_slope=0.9,
@@ -225,6 +232,18 @@ def main():
                 s1 = pipeline.stage1_complete(pts)
                 pred_mask = np.zeros(len(pts), dtype=bool)
                 pred_mask[s1['nonground_indices']] = True
+
+            elif config_name == 'PW++ + WR + DBSCAN':
+                # PW++ + WR + DBSCAN (sin delta-r)
+                s1 = pipeline.stage1_complete(pts)
+                obs_mask = np.zeros(len(pts), dtype=bool)
+                obs_mask[s1['nonground_indices']] = True
+                pred_mask = replay_dbscan(
+                    pts, obs_mask,
+                    dbscan_params['eps'],
+                    dbscan_params['min_samples'],
+                    dbscan_params['min_pts'],
+                )
 
             elif config_name == 'PW++ + WR + delta-r':
                 # Pipeline Stage 1+2 (sin DBSCAN)
