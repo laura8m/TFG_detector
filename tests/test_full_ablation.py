@@ -17,33 +17,18 @@ import argparse
 import time
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, '/home/lau8m/lidar_ws/TFG-LiDAR-Geometry/src/patchwork-plusplus/python/pwenv/lib/python3.12/site-packages')
 
 from lidar_pipeline_suite import LidarPipelineSuite, PipelineConfig
+from data_paths import get_sequence_info, get_scan_file, get_label_file
 
 # ========================================
 # UTILIDADES
 # ========================================
 
-SEQUENCES = {
-    '04': {
-        'data_dir': Path(__file__).parent.parent / "data_kitti" / "04" / "04",
-        'label_dir': Path(__file__).parent.parent / "data_kitti" / "04_labels" / "04" / "labels",
-        'poses_file': str(Path(__file__).parent.parent / "data_kitti" / "04_labels" / "04" / "poses.txt"),
-    },
-    '00': {
-        'data_dir': Path(__file__).parent.parent / "data_kitti" / "00" / "00",
-        'label_dir': Path(__file__).parent.parent / "data_kitti" / "00_labels" / "00" / "labels",
-        'poses_file': str(Path(__file__).parent.parent / "data_kitti" / "00_labels" / "00" / "poses.txt"),
-    }
-}
-
-
 def load_kitti_scan(scan_id: int, seq: str):
-    info = SEQUENCES[seq]
-    scan_file = info['data_dir'] / "velodyne" / f"{scan_id:06d}.bin"
+    scan_file = get_scan_file(seq, scan_id)
     points = np.fromfile(scan_file, dtype=np.float32).reshape(-1, 4)[:, :3]
-    label_file = info['label_dir'] / f"{scan_id:06d}.label"
+    label_file = get_label_file(seq, scan_id)
     if label_file.exists():
         labels = np.fromfile(label_file, dtype=np.uint32)
         semantic_labels = labels & 0xFFFF
@@ -85,40 +70,21 @@ def get_gt_obstacle_mask(semantic_labels):
 # ABLATION CONFIGS
 # ========================================
 
-def get_ablation_configs(include_hcd_ablation=False):
-    """Retorna dict de configs para ablation acumulativo.
-    Si include_hcd_ablation=True, añade variantes sin HCD para medir su impacto."""
+def get_ablation_configs():
+    """Retorna dict de configs para ablation acumulativo."""
     configs = {
         'Stage 2 (baseline)': PipelineConfig(
             enable_hybrid_wall_rejection=True,
-            enable_hcd=True,
             enable_cluster_filtering=False,
             verbose=False
         ),
         'Stage 2→3': PipelineConfig(
             enable_hybrid_wall_rejection=True,
-            enable_hcd=True,
             enable_cluster_filtering=True,
             cluster_min_pts=15,
             verbose=False
         ),
     }
-
-    if include_hcd_ablation:
-        # Variantes SIN HCD para medir su contribución
-        configs['Stage 2 (sin HCD)'] = PipelineConfig(
-            enable_hybrid_wall_rejection=True,
-            enable_hcd=False,
-            enable_cluster_filtering=False,
-            verbose=False
-        )
-        configs['Stage 2→3 (sin HCD)'] = PipelineConfig(
-            enable_hybrid_wall_rejection=True,
-            enable_hcd=False,
-            enable_cluster_filtering=True,
-            cluster_min_pts=15,
-            verbose=False
-        )
 
     return configs
 
@@ -172,8 +138,8 @@ def run_config(config_name, config, seq, scan_start, n_frames, poses):
 # TEST POR SECUENCIA
 # ========================================
 
-def test_sequence(seq, scan_start, n_frames, include_hcd_ablation=False):
-    info = SEQUENCES[seq]
+def test_sequence(seq, scan_start, n_frames):
+    info = get_sequence_info(seq)
     if not info['data_dir'].exists():
         print(f"  [SKIP] Datos no encontrados: {info['data_dir']}")
         return None
@@ -189,7 +155,7 @@ def test_sequence(seq, scan_start, n_frames, include_hcd_ablation=False):
     print(f"SECUENCIA {seq} | Frames {scan_start}-{scan_ref} ({n_frames} frames) | GT obstacles: {gt_mask.sum()}")
     print("=" * 90)
 
-    configs = get_ablation_configs(include_hcd_ablation=include_hcd_ablation)
+    configs = get_ablation_configs()
     all_metrics = {}
     all_timings = {}
 
@@ -256,27 +222,6 @@ def test_sequence(seq, scan_start, n_frames, include_hcd_ablation=False):
         print(f"    Precision: {100*(m_full['precision']-m_base['precision']):+.2f}%")
         print(f"    Recall:    {100*(m_full['recall']-m_base['recall']):+.2f}%")
 
-    # HCD ablation: comparar con y sin HCD
-    if 'Stage 2 (sin HCD)' in all_metrics and 'Stage 2 (baseline)' in all_metrics:
-        print(f"\n{'='*90}")
-        print(f"ABLATION HCD - SECUENCIA {seq}")
-        print(f"{'='*90}")
-
-        m_hcd = all_metrics['Stage 2 (baseline)']
-        m_nohcd = all_metrics['Stage 2 (sin HCD)']
-        print(f"\n  Stage 2 single-frame:")
-        print(f"    Con HCD:   F1={100*m_hcd['f1']:.1f}%  IoU={100*m_hcd['iou']:.1f}%  P={100*m_hcd['precision']:.1f}%  R={100*m_hcd['recall']:.1f}%  FP={m_hcd['fp']}")
-        print(f"    Sin HCD:   F1={100*m_nohcd['f1']:.1f}%  IoU={100*m_nohcd['iou']:.1f}%  P={100*m_nohcd['precision']:.1f}%  R={100*m_nohcd['recall']:.1f}%  FP={m_nohcd['fp']}")
-        print(f"    Delta:     F1={100*(m_hcd['f1']-m_nohcd['f1']):+.2f}%  IoU={100*(m_hcd['iou']-m_nohcd['iou']):+.2f}%  FP={m_hcd['fp']-m_nohcd['fp']:+d}")
-
-    if 'Stage 2→3 (sin HCD)' in all_metrics and 'Stage 2→3' in all_metrics:
-        m_full_hcd = all_metrics['Stage 2→3']
-        m_full_nohcd = all_metrics['Stage 2→3 (sin HCD)']
-        print(f"\n  Pipeline completo (Stage 2→3):")
-        print(f"    Con HCD:   F1={100*m_full_hcd['f1']:.1f}%  IoU={100*m_full_hcd['iou']:.1f}%  P={100*m_full_hcd['precision']:.1f}%  R={100*m_full_hcd['recall']:.1f}%  FP={m_full_hcd['fp']}")
-        print(f"    Sin HCD:   F1={100*m_full_nohcd['f1']:.1f}%  IoU={100*m_full_nohcd['iou']:.1f}%  P={100*m_full_nohcd['precision']:.1f}%  R={100*m_full_nohcd['recall']:.1f}%  FP={m_full_nohcd['fp']}")
-        print(f"    Delta:     F1={100*(m_full_hcd['f1']-m_full_nohcd['f1']):+.2f}%  IoU={100*(m_full_hcd['iou']-m_full_nohcd['iou']):+.2f}%  FP={m_full_hcd['fp']-m_full_nohcd['fp']:+d}")
-
     return all_metrics, all_timings
 
 
@@ -289,16 +234,15 @@ def main():
     parser.add_argument('--scan_start', type=int, default=0)
     parser.add_argument('--n_frames', type=int, default=10)
     parser.add_argument('--seq', type=str, default='both', choices=['00', '04', 'both'])
-    parser.add_argument('--hcd', action='store_true', help='Incluir ablation de HCD (con vs sin)')
     args = parser.parse_args()
 
     all_results = {}
 
     if args.seq in ('04', 'both'):
-        all_results['04'] = test_sequence('04', args.scan_start, args.n_frames, args.hcd)
+        all_results['04'] = test_sequence('04', args.scan_start, args.n_frames)
 
     if args.seq in ('00', 'both'):
-        all_results['00'] = test_sequence('00', args.scan_start, args.n_frames, args.hcd)
+        all_results['00'] = test_sequence('00', args.scan_start, args.n_frames)
 
     # Resumen global
     if len(all_results) > 1 and all(v is not None for v in all_results.values()):

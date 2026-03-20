@@ -3,14 +3,12 @@
 Visualizador del pipeline LiDAR por stages en RViz.
 
 Publica la nube de puntos coloreada por clasificación después de cada stage,
-para ver la evolución del pipeline. Para Stage 3 (temporal), procesa todos
-los frames pero solo publica el resultado del último.
+para ver la evolución del pipeline.
 
-Pipeline de 4 stages:
+Pipeline de 3 stages:
   1. Ground estimation (Patchwork++ + wall rejection)
   2. Delta-r anomaly detection
-  3. Bayesian temporal filter
-  4. DBSCAN clustering + hull generation
+  3. DBSCAN clustering + hull generation
 
 Colores en RViz (usar PointCloud2 con color por campo 'rgb'):
   - Verde:    suelo (ground)
@@ -22,7 +20,7 @@ Colores en RViz (usar PointCloud2 con color por campo 'rgb'):
 Uso:
   python3 run_pipeline_viz.py --seq 00 --scan 50
   python3 run_pipeline_viz.py --seq 04 --scan_start 0 --scan_end 10
-  python3 run_pipeline_viz.py --seq 00 --scan 50 --stages 1 2 4
+  python3 run_pipeline_viz.py --seq 00 --scan 50 --stages 1 2 3
 """
 
 import numpy as np
@@ -42,36 +40,21 @@ from std_msgs.msg import Header
 from pathlib import Path
 
 from lidar_pipeline_suite import LidarPipelineSuite, PipelineConfig
+from data_paths import get_sequence_info, get_scan_file, get_label_file
 
 
 # ========================================
 # DATOS KITTI
 # ========================================
 
-SEQUENCES = {
-    '04': {
-        'data_dir': Path(__file__).parent / "data_kitti" / "04" / "04",
-        'label_dir': Path(__file__).parent / "data_kitti" / "04_labels" / "04" / "labels",
-        'poses_file': str(Path(__file__).parent / "data_kitti" / "04_labels" / "04" / "poses.txt"),
-    },
-    '00': {
-        'data_dir': Path(__file__).parent / "data_kitti" / "00" / "00",
-        'label_dir': Path(__file__).parent / "data_kitti" / "00_labels" / "00" / "labels",
-        'poses_file': str(Path(__file__).parent / "data_kitti" / "00_labels" / "00" / "poses.txt"),
-    }
-}
-
-
 def load_scan(scan_id, seq):
-    info = SEQUENCES[seq]
-    scan_file = info['data_dir'] / "velodyne" / f"{scan_id:06d}.bin"
+    scan_file = get_scan_file(seq, scan_id)
     points = np.fromfile(scan_file, dtype=np.float32).reshape(-1, 4)[:, :3]
     return points
 
 
 def load_gt_labels(scan_id, seq):
-    info = SEQUENCES[seq]
-    label_file = info['label_dir'] / f"{scan_id:06d}.label"
+    label_file = get_label_file(seq, scan_id)
     if label_file.exists():
         labels = np.fromfile(label_file, dtype=np.uint32)
         return labels & 0xFFFF
@@ -150,7 +133,6 @@ class PipelineVizNode(Node):
         self.pub_stage1 = self.create_publisher(PointCloud2, '/stage1_cloud', 10)
         self.pub_stage2 = self.create_publisher(PointCloud2, '/stage2_cloud', 10)
         self.pub_stage3 = self.create_publisher(PointCloud2, '/stage3_cloud', 10)
-        self.pub_stage4 = self.create_publisher(PointCloud2, '/stage4_cloud', 10)
         self.pub_gt     = self.create_publisher(PointCloud2, '/gt_cloud', 10)
 
         # Timer para ejecutar una vez tras inicializar
@@ -245,30 +227,7 @@ class PipelineVizNode(Node):
         return rgb
 
     def colorize_stage3(self, points, result):
-        """Stage 3: resultado del filtro temporal (último frame)."""
-        N = len(points)
-        rgb = np.full(N, COLOR_UNCERTAIN, dtype=np.float32)
-
-        ground_idx = result.get('ground_indices', np.array([]))
-        if len(ground_idx) > 0:
-            rgb[ground_idx] = COLOR_GROUND
-
-        rgb[result['obs_mask']] = COLOR_OBSTACLE
-
-        # Colorear por probabilidad (gradiente rojo)
-        if 'belief_prob' in result:
-            obs = result['obs_mask']
-            prob = result['belief_prob'][obs]
-            # Más intenso = más seguro
-            for i, idx in enumerate(np.where(obs)[0]):
-                p = prob[i] if i < len(prob) else 0.5
-                r_val = int(130 + 125 * min(p, 1.0))
-                rgb[idx] = rgb_to_float(r_val, 30, 30)
-
-        return rgb
-
-    def colorize_stage4(self, points, result):
-        """Stage 4: clusters coloreados (DBSCAN)."""
+        """Stage 3: clusters coloreados (DBSCAN)."""
         N = len(points)
         rgb = np.full(N, COLOR_UNCERTAIN, dtype=np.float32)
 
@@ -318,166 +277,71 @@ class PipelineVizNode(Node):
         self.pipeline = LidarPipelineSuite(config)
 
         # Cargar poses
-        info = SEQUENCES[seq]
+        info = get_sequence_info(seq)
         poses = LidarPipelineSuite.load_kitti_poses(info['poses_file'])
 
         scan_final = args.scan_end
 
         # ----------------------------------------------------------------
-        # Stage 3 necesita procesar todos los frames para acumular belief
+        # Procesar el frame final a través del pipeline
         # ----------------------------------------------------------------
-        if 3 in stages or 4 in stages:
-            self.get_logger().info(f"  Procesando frames {args.scan_start}-{scan_final} para acumular temporal...")
+        points = load_scan(scan_final, seq)
 
-            # Acumular belief en frames previos (sin guardar snapshots)
-            for scan_id in range(args.scan_start, scan_final):
-                pts = load_scan(scan_id, seq)
-                dp = None
-                if poses and scan_id > args.scan_start:
-                    dp = LidarPipelineSuite.compute_delta_pose(
-                        poses[scan_id - 1], poses[scan_id]
-                    )
-                # Solo acumular belief, no necesitamos resultado
-                self.pipeline.stage3_per_point(pts, dp)
-
-                if scan_id % 10 == 0:
-                    self.get_logger().info(f"    Acumulando frame {scan_id}...")
-
-            # Último frame: ejecutar stage a stage y guardar snapshots
-            points = load_scan(scan_final, seq)
-            delta_pose = None
-            if poses and scan_final > args.scan_start:
-                delta_pose = LidarPipelineSuite.compute_delta_pose(
-                    poses[scan_final - 1], poses[scan_final]
-                )
-
-            # Stage 1+2+3 (stage3 ejecuta stage1+2 internamente y aplica temporal)
-            result_s3 = self.pipeline.stage3_per_point(points, delta_pose)
+        # Stage 1+2+3 completo (stage3_complete ejecuta stage1+2+3 internamente)
+        if 3 in stages:
+            result_s3 = self.pipeline.stage3_complete(points)
 
             # Snapshot Stage 2: usar el resultado que stage3 calculó internamente
-            # (guardado en last_stage2_result, antes de aplicar filtro temporal)
             result_s2 = self.pipeline.last_stage2_result
-            self.get_logger().info(
-                f"  [DEBUG] Stage 2 snapshot: obs_mask.shape={result_s2['obs_mask'].shape}, "
-                f"points.shape={points.shape}, match={len(points) == len(result_s2['obs_mask'])}"
-            )
-
-            # Snapshot Stage 3
-            result_s3_snap = dict(result_s3)
-
-            # Stage 4 (DBSCAN clustering)
-            result_s4 = None
-            if 4 in stages:
-                result_s4 = self.pipeline.stage4_cluster_filtering(points, result_s3)
-                result_s4.update({k: v for k, v in result_s3.items() if k not in result_s4})
-
-            self.get_logger().info(f"\n  Publicando resultados del frame {scan_final}:")
-
-            if 1 in stages:
-                rgb1 = self.colorize_stage1(points, result_s3)
-                self.pub_stage1.publish(self.create_rgb_cloud(points, rgb1))
-                n_ground = len(result_s3['ground_indices'])
-                n_walls = len(result_s3.get('rejected_walls', []))
-                self.get_logger().info(f"    Stage 1: ground={n_ground}, walls={n_walls}")
-
-            if 2 in stages:
-                rgb2 = self.colorize_stage2(points, result_s2)
-                self.pub_stage2.publish(self.create_rgb_cloud(points, rgb2))
-                n_obs = result_s2['obs_mask'].sum()
-                n_gnd = result_s2['ground_mask'].sum()
-                n_void = result_s2.get('void_mask', np.zeros(0)).sum()
-                n_unc = result_s2.get('uncertain_mask', np.zeros(0)).sum()
-                self.get_logger().info(
-                    f"    Stage 2: obs={n_obs}, ground={n_gnd}, void={n_void}, "
-                    f"uncertain={n_unc}, total={len(points)}"
-                )
-
-            if 3 in stages:
-                rgb3 = self.colorize_stage3(points, result_s3_snap)
-                self.pub_stage3.publish(self.create_rgb_cloud(points, rgb3))
-                self.get_logger().info(
-                    f"    Stage 3: obs={result_s3_snap['obs_mask'].sum()}, "
-                    f"gamma={result_s3_snap.get('gamma_effective', 0):.2f}"
-                )
-
-            if 4 in stages and result_s4:
-                rgb4 = self.colorize_stage4(points, result_s4)
-                self.pub_stage4.publish(self.create_rgb_cloud(points, rgb4))
-                self.get_logger().info(
-                    f"    Stage 4: clusters={result_s4.get('n_clusters', 0)}, "
-                    f"removed={result_s4.get('n_cluster_total_removed', 0)}"
-                )
-
-            # Guardar snapshots por stage para republish
-            self._snapshots = {
-                's1': result_s3,  # Stage 1 info (ground_indices, walls)
-                's2': result_s2,
-                's3': result_s3_snap,
-                's4': result_s4,
-            }
-
         else:
-            # Solo stages 1, 2, 4 (sin temporal) — un solo frame
-            points = load_scan(scan_final, seq)
+            # Solo stages 1 y/o 2 — no necesitamos Stage 3
+            result_s2 = self.pipeline.stage2_complete(points)
+            result_s3 = None
 
-            # Stage 1
-            result_s1 = self.pipeline.stage1_complete(points)
+        # Stage 1 info viene dentro de result_s2
+        result_s1 = result_s2
 
-            if 1 in stages:
-                rgb1 = self.colorize_stage1(points, result_s1)
-                self.pub_stage1.publish(self.create_rgb_cloud(points, rgb1))
-                n_ground = len(result_s1['ground_indices'])
-                n_walls = len(result_s1.get('rejected_walls', []))
-                self.get_logger().info(f"  Stage 1: ground={n_ground}, walls={n_walls}")
+        self.get_logger().info(f"\n  Publicando resultados del frame {scan_final}:")
 
-            # Stage 2
-            result_s2 = self.pipeline.compute_delta_r(
-                points,
-                result_s1['ground_indices'],
-                result_s1['n_per_point'],
-                result_s1['d_per_point'],
-                result_s1.get('hcd')
+        if 1 in stages:
+            rgb1 = self.colorize_stage1(points, result_s1)
+            self.pub_stage1.publish(self.create_rgb_cloud(points, rgb1))
+            n_ground = len(result_s1['ground_indices'])
+            n_walls = len(result_s1.get('rejected_walls', []))
+            self.get_logger().info(f"    Stage 1: ground={n_ground}, walls={n_walls}")
+
+        if 2 in stages:
+            rgb2 = self.colorize_stage2(points, result_s2)
+            self.pub_stage2.publish(self.create_rgb_cloud(points, rgb2))
+            n_obs = result_s2['obs_mask'].sum()
+            n_gnd = result_s2['ground_mask'].sum()
+            n_void = result_s2.get('void_mask', np.zeros(0)).sum()
+            n_unc = result_s2.get('uncertain_mask', np.zeros(0)).sum()
+            self.get_logger().info(
+                f"    Stage 2: obs={n_obs}, ground={n_gnd}, void={n_void}, "
+                f"uncertain={n_unc}, total={len(points)}"
             )
-            # Merge
-            result_s2.update(result_s1)
 
-            if 2 in stages:
-                rgb2 = self.colorize_stage2(points, result_s2)
-                self.pub_stage2.publish(self.create_rgb_cloud(points, rgb2))
-                n_obs = result_s2['obs_mask'].sum()
-                n_gnd = result_s2['ground_mask'].sum()
-                n_void = result_s2['void_mask'].sum()
-                n_unc = result_s2.get('uncertain_mask', np.zeros(0)).sum()
-                self.get_logger().info(
-                    f"  Stage 2: obs={n_obs}, ground={n_gnd}, void={n_void}, "
-                    f"uncertain={n_unc}, total={len(points)}"
-                )
+        if 3 in stages and result_s3 is not None:
+            rgb3 = self.colorize_stage3(points, result_s3)
+            self.pub_stage3.publish(self.create_rgb_cloud(points, rgb3))
+            self.get_logger().info(
+                f"    Stage 3: clusters={result_s3.get('n_clusters', 0)}, "
+                f"removed={result_s3.get('n_cluster_total_removed', 0)}"
+            )
 
-            # Guardar snapshots para republish
-            self._snapshots = {
-                's1': result_s1,
-                's2': result_s2,
-                's3': None,
-                's4': None,
-            }
-
-            # Stage 4 sin temporal (DBSCAN clustering)
-            if 4 in stages:
-                result_s4 = self.pipeline.stage4_cluster_filtering(points, result_s2)
-                result_s4.update(result_s2)
-                self._snapshots['s4'] = result_s4
-                rgb4 = self.colorize_stage4(points, result_s4)
-                self.pub_stage4.publish(self.create_rgb_cloud(points, rgb4))
-                self.get_logger().info(
-                    f"  Stage 4: clusters={result_s4.get('n_clusters', 0)}, "
-                    f"removed={result_s4.get('n_cluster_total_removed', 0)}"
-                )
+        # Guardar snapshots por stage para republish
+        self._snapshots = {
+            's1': result_s1,
+            's2': result_s2,
+            's3': result_s3,
+        }
 
         # Ground truth
         self.publish_gt(scan_final, seq, points)
 
         self.get_logger().info("\n=== Publicado. Mantén RViz abierto. Ctrl+C para salir. ===")
-        self.get_logger().info("  Topics: /stage1_cloud /stage2_cloud /stage3_cloud /stage4_cloud /gt_cloud")
+        self.get_logger().info("  Topics: /stage1_cloud /stage2_cloud /stage3_cloud /gt_cloud")
         self.get_logger().info("  En RViz: Add > By topic > PointCloud2, Color: 'rgb'")
 
         # Re-publicar periódicamente para que RViz no pierda los mensajes
@@ -500,9 +364,6 @@ class PipelineVizNode(Node):
         if 3 in stages and snaps.get('s3') is not None:
             rgb3 = self.colorize_stage3(points, snaps['s3'])
             self.pub_stage3.publish(self.create_rgb_cloud(points, rgb3))
-        if 4 in stages and snaps.get('s4') is not None:
-            rgb4 = self.colorize_stage4(points, snaps['s4'])
-            self.pub_stage4.publish(self.create_rgb_cloud(points, rgb4))
 
         self.publish_gt(self.args.scan_end, self.args.seq, points)
 
@@ -515,8 +376,8 @@ def main():
     parser.add_argument('--scan', type=int, default=None, help='Frame único (sobrescribe scan_start/end)')
     parser.add_argument('--scan_start', type=int, default=0, help='Primer frame')
     parser.add_argument('--scan_end', type=int, default=10, help='Último frame')
-    parser.add_argument('--stages', type=int, nargs='+', default=[1, 2, 3, 4],
-                        help='Stages a visualizar (default: 1 2 3 4)')
+    parser.add_argument('--stages', type=int, nargs='+', default=[1, 2, 3],
+                        help='Stages a visualizar (default: 1 2 3)')
     parser.add_argument('--no-rviz', action='store_true', help='No lanzar RViz automáticamente')
 
     clean_args = [a for a in sys.argv[1:] if not a.startswith('--ros-args')]

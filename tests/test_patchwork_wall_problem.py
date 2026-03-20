@@ -19,8 +19,9 @@ import pypatchworkpp
 # ============================================================
 # Configuracion
 # ============================================================
-SCAN_FILE = '/home/lau8m/lidar_ws/TFG-LiDAR-Geometry/sota_idea/data_kitti/04/04/velodyne/000000.bin'
-LABEL_FILE = '/home/lau8m/lidar_ws/TFG-LiDAR-Geometry/sota_idea/data_kitti/04_labels/04/labels/000000.label'
+from data_paths import get_scan_file, get_label_file
+SCAN_FILE = str(get_scan_file('04', 0))
+LABEL_FILE = str(get_label_file('04', 0))
 
 # SemanticKITTI label mapping
 LABEL_NAMES = {

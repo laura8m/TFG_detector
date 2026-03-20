@@ -462,7 +462,8 @@ Topics ablation:
         if cli_args.data_path:
             base_path = Path(cli_args.data_path)
         else:
-            base_path = Path('/home/lau8m/lidar_ws/TFG-LiDAR-Geometry/sota_idea/data_kitti/04/04/velodyne/')
+            from data_paths import get_velodyne_dir
+            base_path = get_velodyne_dir('04')
 
         # Modo ablation
         if cli_args.ablation:

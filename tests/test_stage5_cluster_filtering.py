@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Test Stage 4: DBSCAN Cluster Filtering
+Test Stage 3: DBSCAN Cluster Filtering
 
 Compara en ambas secuencias KITTI (00 y 04):
 - Stage 2 solo (baseline single-frame)
-- Stage 3+ego (temporal con gamma fix)
-- Stage 4 = Stage 3+ego + DBSCAN cluster filtering
+- Stage 3 = Stage 2 + DBSCAN cluster filtering
 
-Objetivo: Validar que Stage 4 reduce FP (puntos dispersos) manteniendo recall.
+Objetivo: Validar que Stage 3 reduce FP (puntos dispersos) manteniendo recall.
 """
 
 import sys
@@ -18,35 +17,20 @@ import time
 
 # Add paths
 sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, '/home/lau8m/lidar_ws/TFG-LiDAR-Geometry/src/patchwork-plusplus/python/pwenv/lib/python3.12/site-packages')
 
 from lidar_pipeline_suite import LidarPipelineSuite, PipelineConfig
+from data_paths import get_sequence_info, get_scan_file, get_label_file
 
 # ========================================
 # UTILIDADES
 # ========================================
 
-SEQUENCES = {
-    '04': {
-        'data_dir': Path(__file__).parent.parent / "data_kitti" / "04" / "04",
-        'label_dir': Path(__file__).parent.parent / "data_kitti" / "04_labels" / "04" / "labels",
-        'poses_file': str(Path(__file__).parent.parent / "data_kitti" / "04_labels" / "04" / "poses.txt"),
-    },
-    '00': {
-        'data_dir': Path(__file__).parent.parent / "data_kitti" / "00" / "00",
-        'label_dir': Path(__file__).parent.parent / "data_kitti" / "00_labels" / "00" / "labels",
-        'poses_file': str(Path(__file__).parent.parent / "data_kitti" / "00_labels" / "00" / "poses.txt"),
-    }
-}
-
-
 def load_kitti_scan(scan_id: int, seq: str = '04'):
     """Cargar scan de KITTI con labels"""
-    info = SEQUENCES[seq]
-    scan_file = info['data_dir'] / "velodyne" / f"{scan_id:06d}.bin"
+    scan_file = get_scan_file(seq, scan_id)
     points = np.fromfile(scan_file, dtype=np.float32).reshape(-1, 4)[:, :3]
 
-    label_file = info['label_dir'] / f"{scan_id:06d}.label"
+    label_file = get_label_file(seq, scan_id)
     if label_file.exists():
         labels = np.fromfile(label_file, dtype=np.uint32)
         semantic_labels = labels & 0xFFFF
@@ -106,10 +90,10 @@ def print_metrics(name, metrics, timing_ms=None):
 
 def test_sequence(seq: str, scan_start: int, n_frames: int):
     """Ejecutar test completo en una secuencia"""
-    info = SEQUENCES[seq]
+    info = get_sequence_info(seq)
 
     print("=" * 80)
-    print(f"SECUENCIA {seq} | Frames {scan_start}-{scan_start + n_frames - 1}")
+    print(f"SECUENCIA {seq} | Frame {scan_start}")
     print("=" * 80)
 
     # Verificar que existen los datos
@@ -117,15 +101,10 @@ def test_sequence(seq: str, scan_start: int, n_frames: int):
         print(f"  [SKIP] Datos no encontrados: {info['data_dir']}")
         return None
 
-    # Cargar poses
-    poses = LidarPipelineSuite.load_kitti_poses(info['poses_file'])
-    print(f"  Poses cargadas: {len(poses)}")
-
-    # Frame de referencia (último)
-    scan_ref = scan_start + n_frames - 1
-    points_ref, labels_ref = load_kitti_scan(scan_ref, seq)
+    # Frame de referencia
+    points_ref, labels_ref = load_kitti_scan(scan_start, seq)
     gt_mask = get_gt_obstacle_mask(labels_ref)
-    print(f"  Frame referencia (scan {scan_ref}): {len(points_ref)} pts, {gt_mask.sum()} obstacles GT")
+    print(f"  Frame referencia (scan {scan_start}): {len(points_ref)} pts, {gt_mask.sum()} obstacles GT")
     print()
 
     results = {}
@@ -139,7 +118,6 @@ def test_sequence(seq: str, scan_start: int, n_frames: int):
 
     pipeline_s2 = LidarPipelineSuite(PipelineConfig(
         enable_hybrid_wall_rejection=True,
-        enable_hcd=True,
         verbose=False
     ))
     result_s2 = pipeline_s2.stage2_complete(points_ref)
@@ -149,15 +127,14 @@ def test_sequence(seq: str, scan_start: int, n_frames: int):
     print()
 
     # ========================================
-    # 2. STAGE 4 = Stage 3+ego + DBSCAN Cluster Filtering
+    # 2. STAGE 3 = Stage 2 + DBSCAN Cluster Filtering
     # ========================================
     print("-" * 60)
-    print(f"CONFIG 2: Stage 4 = Stage 3+ego + DBSCAN ({n_frames} frames)")
+    print(f"CONFIG 2: Stage 3 = Stage 2 + DBSCAN")
     print("-" * 60)
 
-    pipeline_s4 = LidarPipelineSuite(PipelineConfig(
+    pipeline_s3 = LidarPipelineSuite(PipelineConfig(
         enable_hybrid_wall_rejection=True,
-        enable_hcd=True,
         enable_cluster_filtering=True,
         cluster_eps=0.5,
         cluster_min_samples=5,
@@ -165,37 +142,30 @@ def test_sequence(seq: str, scan_start: int, n_frames: int):
         verbose=False
     ))
 
-    for i in range(n_frames):
-        scan_id = scan_start + i
-        pts, _ = load_kitti_scan(scan_id, seq)
-        delta_pose = None if i == 0 else LidarPipelineSuite.compute_delta_pose(
-            poses[scan_start + i - 1], poses[scan_start + i]
-        )
-        result_s4 = pipeline_s4.stage4_per_point(pts, delta_pose=delta_pose)
-        if (i + 1) % 5 == 0:
-            n_clusters = result_s4.get('n_clusters', 0)
-            n_removed = result_s4.get('n_cluster_total_removed', 0)
-            print(f"  Frame {scan_id}: {result_s4['obs_mask'].sum()} obs | {n_clusters} clusters | {n_removed} pts removed")
+    result_s3 = pipeline_s3.stage3_complete(points_ref)
 
-    metrics_s4 = compute_detection_metrics(gt_mask, result_s4['obs_mask'])
-    print_metrics("Stage 4", metrics_s4, result_s4.get('timing_total_ms'))
-    print(f"    Stage 4 timing: {result_s4.get('timing_stage4_ms', 0):.1f} ms")
-    print(f"    Clusters: {result_s4.get('n_clusters', 0)} valid | {result_s4.get('n_clusters_rejected', 0)} rejected")
-    print(f"    Removed: {result_s4.get('n_cluster_total_removed', 0)} pts (noise: {result_s4.get('n_noise_removed', 0)}, small: {result_s4.get('n_small_cluster_removed', 0)})")
-    results['stage4'] = metrics_s4
+    n_clusters = result_s3.get('n_clusters', 0)
+    n_removed = result_s3.get('n_cluster_total_removed', 0)
+    print(f"  {result_s3['obs_mask'].sum()} obs | {n_clusters} clusters | {n_removed} pts removed")
+
+    metrics_s3 = compute_detection_metrics(gt_mask, result_s3['obs_mask'])
+    print_metrics("Stage 3", metrics_s3, result_s3.get('timing_total_ms'))
+    print(f"    Stage 3 timing: {result_s3.get('timing_stage3_ms', 0):.1f} ms")
+    print(f"    Clusters: {result_s3.get('n_clusters', 0)} valid | {result_s3.get('n_clusters_rejected', 0)} rejected")
+    print(f"    Removed: {result_s3.get('n_cluster_total_removed', 0)} pts (noise: {result_s3.get('n_noise_removed', 0)}, small: {result_s3.get('n_small_cluster_removed', 0)})")
+    results['stage3'] = metrics_s3
     print()
 
     # ========================================
-    # 3. ABLATION: Stage 4 con diferentes min_pts
+    # 3. ABLATION: Stage 3 con diferentes min_pts
     # ========================================
     print("-" * 60)
-    print(f"ABLATION: Stage 4 variando cluster_min_pts")
+    print(f"ABLATION: Stage 3 variando cluster_min_pts")
     print("-" * 60)
 
     for min_pts in [5, 10, 15, 25, 50]:
         pipeline_abl = LidarPipelineSuite(PipelineConfig(
             enable_hybrid_wall_rejection=True,
-            enable_hcd=True,
             enable_cluster_filtering=True,
             cluster_eps=0.5,
             cluster_min_samples=5,
@@ -203,19 +173,13 @@ def test_sequence(seq: str, scan_start: int, n_frames: int):
             verbose=False
         ))
 
-        for i in range(n_frames):
-            scan_id = scan_start + i
-            pts, _ = load_kitti_scan(scan_id, seq)
-            delta_pose = None if i == 0 else LidarPipelineSuite.compute_delta_pose(
-                poses[scan_start + i - 1], poses[scan_start + i]
-            )
-            result_abl = pipeline_abl.stage4_per_point(pts, delta_pose=delta_pose)
+        result_abl = pipeline_abl.stage3_complete(points_ref)
 
         m = compute_detection_metrics(gt_mask, result_abl['obs_mask'])
         fp_vs_s2 = results['stage2']['fp'] - m['fp']
         recall_loss = 100 * (results['stage2']['recall'] - m['recall'])
         print(f"  min_pts={min_pts:>3}: P={100*m['precision']:.1f}% R={100*m['recall']:.1f}% F1={100*m['f1']:.1f}% | FP removed: {fp_vs_s2} | Recall loss: {recall_loss:.2f}%")
-        results[f'stage4_min{min_pts}'] = m
+        results[f'stage3_min{min_pts}'] = m
 
     print()
 
@@ -228,21 +192,21 @@ def test_sequence(seq: str, scan_start: int, n_frames: int):
     print()
     print(f"{'Config':<25} {'Precision':>10} {'Recall':>10} {'F1':>10} {'FP':>8} {'FN':>8}")
     print("-" * 71)
-    for name in ['stage2', 'stage4']:
+    for name in ['stage2', 'stage3']:
         if name in results:
             m = results[name]
             print(f"{name:<25} {100*m['precision']:>9.2f}% {100*m['recall']:>9.2f}% {100*m['f1']:>9.2f}% {m['fp']:>8} {m['fn']:>8}")
     print()
 
     # Impacto de DBSCAN
-    if 'stage2' in results and 'stage4' in results:
-        fp_reduction = results['stage2']['fp'] - results['stage4']['fp']
+    if 'stage2' in results and 'stage3' in results:
+        fp_reduction = results['stage2']['fp'] - results['stage3']['fp']
         fp_pct = 100 * fp_reduction / max(results['stage2']['fp'], 1)
-        recall_loss = 100 * (results['stage2']['recall'] - results['stage4']['recall'])
-        precision_gain = 100 * (results['stage4']['precision'] - results['stage2']['precision'])
-        f1_change = 100 * (results['stage4']['f1'] - results['stage2']['f1'])
+        recall_loss = 100 * (results['stage2']['recall'] - results['stage3']['recall'])
+        precision_gain = 100 * (results['stage3']['precision'] - results['stage2']['precision'])
+        f1_change = 100 * (results['stage3']['f1'] - results['stage2']['f1'])
 
-        print(f"  IMPACTO DBSCAN Cluster Filtering (Stage 2 → Stage 4):")
+        print(f"  IMPACTO DBSCAN Cluster Filtering (Stage 2 -> Stage 3):")
         print(f"    FP eliminados: {fp_reduction} ({fp_pct:.1f}%)")
         print(f"    Precision:  {precision_gain:+.2f}%")
         print(f"    Recall:     {recall_loss:+.2f}% (negativo = pérdida)")
@@ -257,7 +221,7 @@ def test_sequence(seq: str, scan_start: int, n_frames: int):
 # ========================================
 
 def main():
-    parser = argparse.ArgumentParser(description='Test Stage 4 DBSCAN Cluster Filtering')
+    parser = argparse.ArgumentParser(description='Test Stage 3 DBSCAN Cluster Filtering')
     parser.add_argument('--scan_start', type=int, default=0)
     parser.add_argument('--n_frames', type=int, default=10)
     parser.add_argument('--seq', type=str, default='both', choices=['00', '04', 'both'])
@@ -282,7 +246,7 @@ def main():
                 continue
             print(f"\n  Secuencia {seq}:")
             print(f"    Stage 2:    F1={100*res['stage2']['f1']:.1f}%  P={100*res['stage2']['precision']:.1f}%  R={100*res['stage2']['recall']:.1f}%")
-            print(f"    Stage 4:    F1={100*res['stage4']['f1']:.1f}%  P={100*res['stage4']['precision']:.1f}%  R={100*res['stage4']['recall']:.1f}%")
+            print(f"    Stage 3:    F1={100*res['stage3']['f1']:.1f}%  P={100*res['stage3']['precision']:.1f}%  R={100*res['stage3']['recall']:.1f}%")
 
 
 if __name__ == '__main__':

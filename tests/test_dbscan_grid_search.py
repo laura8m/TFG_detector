@@ -18,31 +18,18 @@ import time
 from itertools import product
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, '/home/lau8m/lidar_ws/TFG-LiDAR-Geometry/src/patchwork-plusplus/python/pwenv/lib/python3.12/site-packages')
 
 from lidar_pipeline_suite import LidarPipelineSuite, PipelineConfig
+from data_paths import get_scan_file, get_label_file
 
 # ========================================
 # DATOS
 # ========================================
 
-SEQUENCES = {
-    '04': {
-        'data_dir': Path(__file__).parent.parent / "data_kitti" / "04" / "04",
-        'label_dir': Path(__file__).parent.parent / "data_kitti" / "04_labels" / "04" / "labels",
-    },
-    '00': {
-        'data_dir': Path(__file__).parent.parent / "data_kitti" / "00" / "00",
-        'label_dir': Path(__file__).parent.parent / "data_kitti" / "00_labels" / "00" / "labels",
-    }
-}
-
-
 def load_kitti_scan(scan_id, seq='04'):
-    info = SEQUENCES[seq]
-    scan_file = info['data_dir'] / "velodyne" / f"{scan_id:06d}.bin"
+    scan_file = get_scan_file(seq, scan_id)
     points = np.fromfile(scan_file, dtype=np.float32).reshape(-1, 4)[:, :3]
-    label_file = info['label_dir'] / f"{scan_id:06d}.label"
+    label_file = get_label_file(seq, scan_id)
     if label_file.exists():
         labels = np.fromfile(label_file, dtype=np.uint32)
         semantic_labels = labels & 0xFFFF
@@ -95,7 +82,6 @@ def run_grid_search(seqs, n_frames, scan_start):
 
     baseline_pipeline = LidarPipelineSuite(PipelineConfig(
         enable_hybrid_wall_rejection=True,
-        enable_hcd=True,
         verbose=False
     ))
 
@@ -137,7 +123,6 @@ def run_grid_search(seqs, n_frames, scan_start):
     for idx, (eps, min_samples, min_pts) in enumerate(combos):
         config = PipelineConfig(
             enable_hybrid_wall_rejection=True,
-            enable_hcd=True,
             enable_cluster_filtering=True,
             cluster_eps=eps,
             cluster_min_samples=min_samples,

@@ -2,14 +2,13 @@
 __pycache__/
 *.pyc
 
-# Datos pesados
-data_kitti/
+# Datos pesados (KITTI Odometry)
+data_odometry_velodyne/
+data_odometry_labels/
 
 # Debug
 debug_output/
 
-# ROS / RViz
-*.rviz
 
 # Otros
 *.log

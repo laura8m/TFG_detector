@@ -5,7 +5,7 @@ Test completo de Stages 1, 2 y 3 en KITTI Sequences 00 y 04.
 Ejecuta:
 - Stage 1: Patchwork++ ground segmentation (analisis de wall misclassification)
 - Stage 2: Delta-r anomaly detection (single frame)
-- Stage 3: Bayesian temporal filter (10 frames, con y sin egomotion)
+- Stage 3: DBSCAN cluster filtering (pipeline completo Stage 1+2+3)
 
 Genera metricas contra ground truth de SemanticKITTI.
 """
@@ -17,7 +17,6 @@ import time
 import json
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, '/home/lau8m/lidar_ws/TFG-LiDAR-Geometry/src/patchwork-plusplus/python/pwenv/lib/python3.12/site-packages')
 
 from lidar_pipeline_suite import LidarPipelineSuite, PipelineConfig
 import pypatchworkpp
@@ -45,20 +44,26 @@ OBSTACLE_LABELS = {10,11,13,15,16,18,20,30,31,32,50,51,52,70,71,80,81,99,
                    252,253,254,255,256,257,258,259}
 CRITICAL_LABELS = {10, 13, 15, 18, 20, 30, 31, 32, 252, 253, 254, 255, 257, 258, 259}
 
-SEQUENCES = {
-    '00': {
-        'velodyne_dir': '/home/lau8m/lidar_ws/TFG-LiDAR-Geometry/sota_idea/data_kitti/00/00/velodyne',
-        'label_dir': '/home/lau8m/lidar_ws/TFG-LiDAR-Geometry/sota_idea/data_kitti/00_labels/00/labels',
-        'poses_file': '/home/lau8m/lidar_ws/TFG-LiDAR-Geometry/sota_idea/data_kitti/00_labels/00/poses.txt',
-        'description': 'Urbana (edificios, coches, vegetacion, aceras)',
-    },
-    '04': {
-        'velodyne_dir': '/home/lau8m/lidar_ws/TFG-LiDAR-Geometry/sota_idea/data_kitti/04/04/velodyne',
-        'label_dir': '/home/lau8m/lidar_ws/TFG-LiDAR-Geometry/sota_idea/data_kitti/04_labels/04/labels',
-        'poses_file': '/home/lau8m/lidar_ws/TFG-LiDAR-Geometry/sota_idea/data_kitti/04_labels/04/poses.txt',
-        'description': 'Autopista (vehiculos rapidos, vallas, vegetacion distante)',
-    }
+from data_paths import get_sequence_info, get_scan_file, get_label_file, get_velodyne_dir, get_labels_dir, get_poses_file
+
+SEQ_DESCRIPTIONS = {
+    '00': 'Urbana (edificios, coches, vegetacion, aceras)',
+    '04': 'Autopista (vehiculos rapidos, vallas, vegetacion distante)',
 }
+
+def _build_sequences():
+    seqs = {}
+    for seq_id, desc in SEQ_DESCRIPTIONS.items():
+        info = get_sequence_info(seq_id)
+        seqs[seq_id] = {
+            'velodyne_dir': str(get_velodyne_dir(seq_id)),
+            'label_dir': str(info['label_dir']),
+            'poses_file': info['poses_file'],
+            'description': desc,
+        }
+    return seqs
+
+SEQUENCES = _build_sequences()
 
 
 # ========================================
@@ -258,7 +263,6 @@ def test_stage2(seq_id, scan_id=0):
 
     config = PipelineConfig(
         enable_hybrid_wall_rejection=True,
-        enable_hcd=True,
         verbose=False
     )
     pipeline = LidarPipelineSuite(config)
@@ -298,86 +302,51 @@ def test_stage2(seq_id, scan_id=0):
 
 
 # ========================================
-# TEST STAGE 3: BAYESIAN TEMPORAL (N FRAMES)
+# TEST STAGE 3: DBSCAN CLUSTER FILTERING (PIPELINE COMPLETO)
 # ========================================
 
-def test_stage3(seq_id, n_frames=10, scan_start=0):
-    """Test Stage 3 con y sin egomotion"""
+def test_stage3(seq_id, scan_id=0):
+    """Test Stage 3: pipeline completo Stage 1+2+3 (DBSCAN cluster filtering)"""
     print(f"\n{'='*80}")
-    print(f"STAGE 3: BAYESIAN TEMPORAL - Sequence {seq_id}, Frames {scan_start}-{scan_start+n_frames-1}")
+    print(f"STAGE 3: DBSCAN CLUSTER FILTERING - Sequence {seq_id}, Frame {scan_id}")
     print(f"{'='*80}")
 
-    seq = SEQUENCES[seq_id]
-    poses = LidarPipelineSuite.load_kitti_poses(seq['poses_file'])
-    print(f"Poses cargadas: {len(poses)}")
+    points, semantic_labels = load_scan(seq_id, scan_id)
+    gt_ground, gt_obstacle, gt_critical = get_gt_masks(semantic_labels)
 
-    # Cargar ultimo frame para GT
-    last_scan = scan_start + n_frames - 1
-    _, semantic_labels_ref = load_scan(seq_id, last_scan)
-    _, gt_obstacle_ref, _ = get_gt_masks(semantic_labels_ref)
+    config = PipelineConfig(
+        enable_hybrid_wall_rejection=True,
+        enable_cluster_filtering=True,
+        cluster_eps=0.5,
+        cluster_min_samples=5,
+        cluster_min_pts=15,
+        verbose=False
+    )
+    pipeline = LidarPipelineSuite(config)
+    result = pipeline.stage3_complete(points)
 
-    results = {}
+    metrics = compute_metrics(gt_obstacle, result['obs_mask'])
 
-    for mode_name, use_egomotion in [('sin_egomotion', False), ('con_egomotion', True)]:
-        print(f"\n--- Stage 3 {mode_name.upper()} ---")
+    print(f"Obstacles detectados: {np.sum(result['obs_mask'])}")
+    print(f"GT obstacles: {np.sum(gt_obstacle)}")
+    print(f"Precision: {100*metrics['precision']:.2f}%")
+    print(f"Recall:    {100*metrics['recall']:.2f}%")
+    print(f"F1:        {100*metrics['f1']:.2f}%")
+    print(f"TP={metrics['tp']} FP={metrics['fp']} FN={metrics['fn']}")
+    print(f"Timing:    {result['timing_total_ms']:.0f} ms")
 
-        config = PipelineConfig(
-            enable_hybrid_wall_rejection=True,
-            enable_hcd=True,
-            verbose=False
-        )
-        pipeline = LidarPipelineSuite(config)
+    n_clusters = result.get('n_clusters', 0)
+    n_removed = result.get('n_cluster_total_removed', 0)
+    print(f"Clusters: {n_clusters} valid | Removed: {n_removed} pts")
 
-        timing_total = 0.0
-        result_final = None
-
-        for i in range(n_frames):
-            scan_id = scan_start + i
-            points, _ = load_scan(seq_id, scan_id)
-
-            delta_pose = None
-            if use_egomotion and i > 0:
-                delta_pose = LidarPipelineSuite.compute_delta_pose(
-                    poses[scan_start + i - 1],
-                    poses[scan_start + i]
-                )
-
-            result = pipeline.stage3_per_point(points, delta_pose=delta_pose)
-            timing_total += result['timing_total_ms']
-
-            if i == n_frames - 1:
-                result_final = result
-
-            if i % 5 == 0 or i == n_frames - 1:
-                obs_count = np.sum(result['obs_mask'])
-                print(f"  Frame {scan_id}: {obs_count} obstacles")
-
-        metrics = compute_metrics(gt_obstacle_ref, result_final['obs_mask'])
-
-        print(f"\n  Obstacles detectados: {np.sum(result_final['obs_mask'])}")
-        print(f"  Precision: {100*metrics['precision']:.2f}%")
-        print(f"  Recall:    {100*metrics['recall']:.2f}%")
-        print(f"  F1:        {100*metrics['f1']:.2f}%")
-        print(f"  TP={metrics['tp']} FP={metrics['fp']} FN={metrics['fn']}")
-        print(f"  Timing medio: {timing_total/n_frames:.0f} ms/frame")
-
-        results[mode_name] = {
-            'n_obstacles_detected': int(np.sum(result_final['obs_mask'])),
-            'metrics': {k: (float(v) if isinstance(v, (float, np.floating)) else v) for k, v in metrics.items()},
-            'timing_avg_ms': float(timing_total / n_frames),
-            'timing_total_ms': float(timing_total),
-        }
-
-    # Comparativa
-    m_no = results['sin_egomotion']['metrics']
-    m_ego = results['con_egomotion']['metrics']
-    print(f"\n  EGOMOTION IMPACT:")
-    print(f"    Recall:    {100*(m_ego['recall']-m_no['recall']):+.2f}%")
-    print(f"    Precision: {100*(m_ego['precision']-m_no['precision']):+.2f}%")
-    print(f"    F1:        {100*(m_ego['f1']-m_no['f1']):+.2f}%")
-    print(f"    FN reduction: {m_no['fn'] - m_ego['fn']}")
-
-    return results
+    return {
+        'n_obstacles_detected': int(np.sum(result['obs_mask'])),
+        'gt_obstacles': int(np.sum(gt_obstacle)),
+        'metrics': {k: (float(v) if isinstance(v, (float, np.floating)) else v) for k, v in metrics.items()},
+        'timing_ms': float(result['timing_total_ms']),
+        'n_clusters': n_clusters,
+        'n_removed': n_removed,
+    }
 
 
 # ========================================
@@ -385,8 +354,6 @@ def test_stage3(seq_id, n_frames=10, scan_start=0):
 # ========================================
 
 def main():
-    N_FRAMES = 10
-
     all_results = {}
 
     for seq_id in ['00', '04']:
@@ -402,8 +369,8 @@ def main():
         # Stage 2: Delta-r (single frame)
         seq_results['stage2'] = test_stage2(seq_id, scan_id=0)
 
-        # Stage 3: Bayesian temporal (N frames)
-        seq_results['stage3'] = test_stage3(seq_id, n_frames=N_FRAMES, scan_start=0)
+        # Stage 3: DBSCAN cluster filtering (pipeline completo)
+        seq_results['stage3'] = test_stage3(seq_id, scan_id=0)
 
         all_results[seq_id] = seq_results
 
@@ -417,18 +384,17 @@ def main():
     for seq_id in ['00', '04']:
         r = all_results[seq_id]
         s2 = r['stage2']['metrics']
-        s3_no = r['stage3']['sin_egomotion']['metrics']
-        s3_ego = r['stage3']['con_egomotion']['metrics']
+        s3 = r['stage3']['metrics']
 
         print(f"\n--- Sequence {seq_id} ({SEQUENCES[seq_id]['description']}) ---")
-        print(f"{'Metrica':<20s} {'Stage 2':>12s} {'S3 sin ego':>12s} {'S3 con ego':>12s}")
-        print(f"{'-'*20} {'-'*12} {'-'*12} {'-'*12}")
-        print(f"{'Precision':<20s} {100*s2['precision']:>11.2f}% {100*s3_no['precision']:>11.2f}% {100*s3_ego['precision']:>11.2f}%")
-        print(f"{'Recall':<20s} {100*s2['recall']:>11.2f}% {100*s3_no['recall']:>11.2f}% {100*s3_ego['recall']:>11.2f}%")
-        print(f"{'F1':<20s} {100*s2['f1']:>11.2f}% {100*s3_no['f1']:>11.2f}% {100*s3_ego['f1']:>11.2f}%")
-        print(f"{'TP':<20s} {s2['tp']:>12d} {s3_no['tp']:>12d} {s3_ego['tp']:>12d}")
-        print(f"{'FP':<20s} {s2['fp']:>12d} {s3_no['fp']:>12d} {s3_ego['fp']:>12d}")
-        print(f"{'FN':<20s} {s2['fn']:>12d} {s3_no['fn']:>12d} {s3_ego['fn']:>12d}")
+        print(f"{'Metrica':<20s} {'Stage 2':>12s} {'Stage 3':>12s}")
+        print(f"{'-'*20} {'-'*12} {'-'*12}")
+        print(f"{'Precision':<20s} {100*s2['precision']:>11.2f}% {100*s3['precision']:>11.2f}%")
+        print(f"{'Recall':<20s} {100*s2['recall']:>11.2f}% {100*s3['recall']:>11.2f}%")
+        print(f"{'F1':<20s} {100*s2['f1']:>11.2f}% {100*s3['f1']:>11.2f}%")
+        print(f"{'TP':<20s} {s2['tp']:>12d} {s3['tp']:>12d}")
+        print(f"{'FP':<20s} {s2['fp']:>12d} {s3['fp']:>12d}")
+        print(f"{'FN':<20s} {s2['fn']:>12d} {s3['fn']:>12d}")
 
         # Stage 1 info
         s1 = r['stage1']

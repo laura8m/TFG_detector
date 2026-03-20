@@ -2087,9 +2087,10 @@ if __name__ == '__main__':
     # Directorio raíz del proyecto (donde está este script)
     SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 
-    # Rutas por defecto a data_kitti (secuencia 04)
-    DEFAULT_VELODYNE_DIR = SCRIPT_DIR / 'data_kitti' / '04' / '04' / 'velodyne'
-    DEFAULT_LABELS_DIR = SCRIPT_DIR / 'data_kitti' / '04_labels' / '04' / 'labels'
+    # Rutas por defecto (secuencia 04)
+    from data_paths import get_velodyne_dir, get_labels_dir
+    DEFAULT_VELODYNE_DIR = get_velodyne_dir('04')
+    DEFAULT_LABELS_DIR = get_labels_dir('04')
 
     parser = argparse.ArgumentParser(
         description='Ring Anomaly Detection - Test con datos KITTI',

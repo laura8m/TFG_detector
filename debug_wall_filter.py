@@ -7,6 +7,7 @@ Muestra por qué los planos candidatos no se rechazan.
 import numpy as np
 from pathlib import Path
 from scipy.spatial import cKDTree
+from data_paths import get_scan_file
 
 # Importar Patchwork++ directamente
 import pypatchworkpp
@@ -15,7 +16,7 @@ def debug_wall_filter(scan_id=0, sequence='00'):
     """Debug detallado del filtro geométrico"""
 
     # Cargar scan
-    scan_path = Path(f'/home/lau8m/lidar_ws/TFG-LiDAR-Geometry/sota_idea/data_kitti/{sequence}/{sequence}/velodyne/{scan_id:06d}.bin')
+    scan_path = get_scan_file(sequence, scan_id)
     scan = np.fromfile(scan_path, dtype=np.float32).reshape(-1, 4)
     points = scan[:, :3]
 

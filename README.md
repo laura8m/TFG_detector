@@ -53,8 +53,9 @@ Si intermedio       →  GROUND normal
 
 Los obstaculos reales forman clusters densos (coche ~200 pts, persona ~50 pts). Los falsos positivos son puntos dispersos sin estructura espacial.
 
-- DBSCAN (eps=0.8m, min_samples=8) — parametros optimizados via grid search (108 combinaciones)
-- Clusters con >= 30 puntos → obstaculo real (se mantiene)
+- Voxel downsampling (celdas 0.24m) antes de DBSCAN: reduce ~30k puntos a ~5k voxels centroides
+- DBSCAN (eps=0.8m, min_samples=4) sobre voxels — parametros optimizados via grid search (108 combinaciones)
+- Clusters con >= 30 puntos originales → obstaculo real (se mantiene)
 - Clusters pequenos o ruido → FP probable (se elimina)
 
 **Metodo principal**: `stage3_cluster_filtering(points, stage2_result)` o `stage3_complete(points)` (pipeline completo)
@@ -146,7 +147,7 @@ Evaluado en KITTI Seq 00 (urbano, ~27 km/h) y Seq 04 (autopista, ~47 km/h), 10 f
 | Configuracion | Seq 04 F1 | Seq 00 F1 | Media F1 | Tiempo total |
 |---------------|-----------|-----------|----------|--------------|
 | Stage 2 (baseline single-frame) | 86.7% | 92.4% | 89.5% | ~87 ms |
-| **Stage 2 → 3 DBSCAN (pipeline final)** | **88.2%** | **93.0%** | **90.6%** | **~377 ms** |
+| **Stage 2 → 3 DBSCAN (pipeline final)** | **88.0%** | **92.9%** | **90.4%** | **~155 ms** |
 
 Nota: Se evaluaron tambien Stage 3 (Bayesian temporal, Dewan et al.) y Stage 4 (Shadow validation, OccAM) pero fueron descartados tras ablation study:
 
@@ -171,17 +172,15 @@ Wall Rejection reduce el obstacle leak (obstaculos GT clasificados como ground) 
 
 Optimizacion: La Fase 2 (point-wise) se reemplazo de KDTree `query_ball_point()` (2300 ms) por voxel grid 2D con percentiles vectorizados (74 ms), logrando 32x speedup con -0.2% F1 de diferencia.
 
-Nota: HCD (Height Coding Descriptor, ERASOR++) fue evaluado pero su impacto en la clasificacion binaria (obs_mask) es nulo sin filtro Bayesiano. HCD solo modula magnitudes de likelihood, que no cambian la clasificacion final por umbral. Se mantiene en el codigo como opcion pero no aporta mejora medible al pipeline actual.
-
 ### Pipeline Completo (Stage 2 → DBSCAN)
 
 | Secuencia | Precision | Recall | F1 | IoU |
 |-----------|-----------|--------|------|------|
-| Seq 04 (highway) | 83.9% | 93.0% | 88.2% | 78.9% |
-| Seq 00 (urbano) | 96.2% | 89.9% | 93.0% | 86.9% |
-| **Media** | **90.1%** | **91.5%** | **90.6%** | **82.9%** |
+| Seq 04 (highway) | 82.9% | 93.8% | 88.0% | 78.6% |
+| Seq 00 (urbano) | 95.9% | 90.1% | 92.9% | 86.7% |
+| **Media** | **89.4%** | **92.0%** | **90.4%** | **82.7%** |
 
-Timing por stage (media): Stage 1+2 = ~80 ms, Stage 3 (DBSCAN) = ~300 ms, **Total = ~377 ms**
+Timing por stage (media): Stage 1+2 = ~85 ms, Stage 3 (DBSCAN con voxel downsampling) = ~70 ms, **Total = ~155 ms (~6.5 Hz)**
 
 ---
 
@@ -210,9 +209,9 @@ Timing por stage (media): Stage 1+2 = ~80 ms, Stage 3 (DBSCAN) = ~300 ms, **Tota
 | RangeNet++ | CNN | ~84% | Si | Si | Solo range image, pierde resolucion 3D |
 | Dewan et al. | Bayesian | ~83% | No | No | Range image (compresion 20:1), sin gamma, sin egomotion |
 | OccAM | Shadow | ~85% | No | Parcial | Solo validacion por sombra, sin temporal |
-| **Este trabajo** | **Geometria** | **90.6%** | **No** | **No** | Single-frame, ~377ms (sin filtro temporal) |
+| **Este trabajo** | **Geometria** | **90.4%** | **No** | **No** | Single-frame, ~155ms / 6.5 Hz (sin filtro temporal) |
 
-**Mejoras respecto a Dewan et al.**: Per-point 3D (sin range image), wall rejection hibrido con voxel grid, DBSCAN cluster filtering optimizado (grid search 108 combinaciones). El filtro temporal Bayesiano y HCD fueron evaluados pero descartados (ver ablation study). Resultado: +7.6% F1.
+**Mejoras respecto a Dewan et al.**: Per-point 3D (sin range image), wall rejection hibrido con voxel grid, DBSCAN cluster filtering con voxel downsampling (grid search 108 combinaciones). El filtro temporal Bayesiano fue evaluado pero descartado (ver ablation study). Resultado: +7.4% F1.
 
 ---
 
@@ -250,6 +249,9 @@ sota_idea/
 ## Papers Implementados
 
 1. **Patchwork++** (Lee et al., RA-L/IROS 2022) — Stage 1: Ground segmentation con CZM
-2. **ERASOR++** (Lim et al., ICRA 2023) — Evaluado: HCD no aporta mejora medible sin filtro Bayesiano (ver ablation study)
-3. **Dewan et al.** (IROS 2018) — Evaluado pero descartado: Bayesian temporal filter no mejora en buen tiempo (ver ablation study)
-4. **OccAM** (Schinagl et al., CVPR 2022) — Evaluado pero descartado: Shadow validation aporta solo +0.3% F1
+2. **Dewan et al.** (IROS 2018) — Evaluado pero descartado: Bayesian temporal filter no mejora en buen tiempo (ver ablation study)
+3. **OccAM** (Schinagl et al., CVPR 2022) — Evaluado pero descartado: Shadow validation aporta solo +0.3% F1
+
+### Papers Evaluados sin Impacto
+
+- **ERASOR++** (Zhang & Zhang, 2024) — HCD (Height Coding Descriptor) evaluado con grid search de 28 combinaciones per-point y 9 per-bin (ERASOR++ style). Maximo +0.15% F1. HCD esta disenado para comparar scans contra un mapa acumulado (dynamic object removal), no para deteccion single-frame. Sin mapa temporal, no tiene contra que comparar. Eliminado del pipeline.

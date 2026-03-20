@@ -57,7 +57,10 @@ class PatchworkVisualizer(Node):
 
         # Cargar datos (scan configurable via argumento --scan, default 0)
         scan_id = getattr(self, 'scan_id', 0)
-        bin_file = Path(f"/home/lau8m/lidar_ws/TFG-LiDAR-Geometry/sota_idea/data_kitti/00/00/velodyne/{scan_id:06d}.bin")
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from data_paths import get_scan_file
+        bin_file = get_scan_file('00', scan_id)
         scan = np.fromfile(bin_file, dtype=np.float32).reshape((-1, 4))
         self.points_raw = scan[:, :3]
 

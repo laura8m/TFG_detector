@@ -141,7 +141,8 @@ def main():
     )
 
     # Path
-    scan_path = Path(f'/home/lau8m/lidar_ws/TFG-LiDAR-Geometry/sota_idea/data_kitti/{args.sequence}/{args.sequence}/velodyne/{args.scan:06d}.bin')
+    from data_paths import get_scan_file
+    scan_path = get_scan_file(args.sequence, args.scan)
 
     if not scan_path.exists():
         print(f'ERROR: {scan_path} not found')

@@ -7,12 +7,13 @@ Muestra estadísticas de los planos locales y su clasificación.
 import numpy as np
 from pathlib import Path
 from lidar_pipeline_suite import LidarPipelineSuite, PipelineConfig
+from data_paths import get_scan_file
 
 def analyze_wall_detection(scan_id=0, sequence='00'):
     """Analiza la detección de paredes en un scan"""
 
     # Cargar scan
-    scan_path = Path(f'/home/lau8m/lidar_ws/TFG-LiDAR-Geometry/sota_idea/data_kitti/{sequence}/{sequence}/velodyne/{scan_id:06d}.bin')
+    scan_path = get_scan_file(sequence, scan_id)
     scan = np.fromfile(scan_path, dtype=np.float32).reshape(-1, 4)
     points = scan[:, :3]
 
