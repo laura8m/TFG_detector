@@ -4,7 +4,7 @@ Sistema de deteccion de obstaculos 3D basado en LiDAR para navegación autónoma
 
 **Tipo**: Trabajo de Fin de Grado (TFG)
 **Lenguaje**: Python (comentarios en español)
-**Ultima actualizacion**: 2026-03-18
+**Ultima actualizacion**: 2026-03-20
 
 ---
 
@@ -13,16 +13,16 @@ Sistema de deteccion de obstaculos 3D basado en LiDAR para navegación autónoma
 ```
 Point Cloud (128k puntos, Velodyne HDL-64E)
        |
-  [Stage 1] Ground Segmentation (Patchwork++ + Wall Rejection + HCD)
+  [Stage 1] Ground Segmentation (Patchwork++ + Wall Rejection)
        |
-  [Stage 2] Delta-r Anomaly Detection (+ fusion HCD)
+  [Stage 2] Delta-r Anomaly Detection
        |
   [Stage 3] DBSCAN Cluster Filtering
        |
   Output: obs_mask (N,), likelihood (N,), cluster_labels (N,)
 ```
 
-### Stage 1: Segmentacion de Suelo + Rechazo de Paredes + HCD
+### Stage 1: Segmentacion de Suelo + Rechazo de Paredes
 
 Separa los puntos ground de los non-ground.
 
@@ -30,9 +30,7 @@ Separa los puntos ground de los non-ground.
 
 - **Rechazo hibrido de paredes**: Patchwork++ clasifica mal las bases de paredes y objetos verticales como suelo. Se corrige en dos fases:
   - Fase 1 (bin-wise): Si la normal del plano tiene `nz < 0.7`, el bin es sospechoso de ser pared
-  - Fase 2 (point-wise): KDTree batch `query_ball_point()` (radio 0.5m), rechaza solo puntos individuales con `delta_Z > 0.3m`
-
-- **HCD (ERASOR++)**: Height Coding Descriptor. Mide la altura relativa de cada punto ground respecto a su plano local. Normalizado con `tanh(z_rel / 0.3)`. Permite distinguir rampas suaves de escalones verticales.
+  - Fase 2 (point-wise): Voxel grid 2D (celdas 1.0m) con percentiles P95-P5 vectorizados. Rechaza puntos individuales con `delta_Z > 0.3m`. Optimizado de KDTree (2300ms) a voxel grid (74ms) con resultados equivalentes
 
 **Metodo principal**: `stage1_complete(points)`
 
@@ -48,8 +46,6 @@ Si delta_r < -0.5m  →  OBSTACULO (algo bloquea el rayo antes del plano)
 Si delta_r > +0.8m  →  VOID (hueco o depresion)
 Si intermedio       →  GROUND normal
 ```
-
-**Fusion HCD** (opcional): Modula la likelihood segun la geometria vertical del HCD. Obstaculos con HCD alto reciben mayor confianza (+4.0 log-odds), ground plano recibe mayor supresion (-2.5).
 
 **Metodo principal**: `stage2_complete(points)` (ejecuta Stage 1 + delta-r)
 
@@ -131,8 +127,9 @@ cd ~/lidar_ws/TFG-LiDAR-Geometry/sota_idea
 | Test | Comando | Que mide |
 |------|---------|----------|
 | **Ablation completo** | `python3 tests/test_full_ablation.py --seq both --n_frames 10` | Contribucion de cada stage (acumulativo) |
-| **Ablation HCD** | `python3 tests/test_full_ablation.py --hcd --seq both --n_frames 10` | Impacto de HCD (con vs sin) |
 | **Pipeline completo** | `python3 tests/test_full_pipeline_both_sequences.py` | Pipeline en ambas secuencias con metricas completas |
+| **Ablation Stage 1** | `python3 tests/test_stage1_ablation.py --seq both --n_frames 10` | PW++ vanilla vs WR: ground seg + obs detection + timing |
+| **Grid search DBSCAN** | `python3 tests/test_dbscan_grid_search.py --seq both --n_frames 10` | Busca eps/min_samples/min_pts optimos para DBSCAN |
 | **Problema paredes** | `python3 tests/test_patchwork_wall_problem.py` | Cuantifica paredes mal clasificadas por Patchwork++ |
 
 Metricas: Precision, Recall, F1, IoU, FP, FN + timing desglosado por stage.
@@ -146,10 +143,10 @@ Evaluado en KITTI Seq 00 (urbano, ~27 km/h) y Seq 04 (autopista, ~47 km/h), 10 f
 
 ### Ablation Acumulativo
 
-| Configuracion | Seq 04 F1 | Seq 00 F1 | Media F1 |
-|---------------|-----------|-----------|----------|
-| Stage 2 (baseline single-frame) | 87.3% | 92.5% | 89.9% |
-| **Stage 2 → 3 DBSCAN (pipeline final)** | **88.6%** | **93.0%** | **90.8%** |
+| Configuracion | Seq 04 F1 | Seq 00 F1 | Media F1 | Tiempo total |
+|---------------|-----------|-----------|----------|--------------|
+| Stage 2 (baseline single-frame) | 86.7% | 92.4% | 89.5% | ~87 ms |
+| **Stage 2 → 3 DBSCAN (pipeline final)** | **87.9%** | **92.8%** | **90.4%** | **~377 ms** |
 
 Nota: Se evaluaron tambien Stage 3 (Bayesian temporal, Dewan et al.) y Stage 4 (Shadow validation, OccAM) pero fueron descartados tras ablation study:
 
@@ -161,26 +158,30 @@ Nota: Se evaluaron tambien Stage 3 (Bayesian temporal, Dewan et al.) y Stage 4 (
 
 Ver `lidar_pipeline_suite_with_bayes.py` para la version con filtro Bayesiano.
 
-### Impacto de HCD (Height Coding Descriptor)
+### Impacto de Wall Rejection (Stage 1 Ablation)
 
-| Configuracion | Seq 04 F1 | Seq 00 F1 | Media F1 |
-|---------------|-----------|-----------|----------|
-| Stage 2 sin HCD | 86.7% | 87.9% | 87.3% |
-| Stage 2 con HCD | 87.3% | 92.5% | 89.9% |
-| **Diferencia** | **+0.57%** | **+4.65%** | **+2.6%** |
-| Pipeline completo sin HCD | 87.7% | 88.7% | 88.2% |
-| Pipeline completo con HCD | 88.0% | 89.1% | 88.5% |
-| **Diferencia** | **+0.32%** | **+0.32%** | **+0.32%** |
+Comparacion de Patchwork++ vanilla vs Stage 1 con rechazo de paredes, 10 frames por secuencia.
 
-HCD tiene mayor impacto en Seq 00 (urbano): reduce 11,861 FP en Stage 2 gracias a la mejor discriminacion de geometria vertical en entornos con edificios y paredes.
+| Configuracion | Mean Gnd F1 | Mean Obs F1 | Mean Leak % | Mean Stage 1 ms |
+|---------------|-------------|-------------|-------------|-----------------|
+| Patchwork++ vanilla | 95.3% | 89.1% | 12.5% | 26 ms |
+| **PW++ + Wall Rejection** | **96.0%** | **89.7%** | **9.1%** | **74 ms** |
+
+Wall Rejection reduce el obstacle leak (obstaculos GT clasificados como ground) de 12.5% a 9.1% y mejora Obs F1 en +0.6%. Mayor impacto en Seq 00 (urbano): leak baja de 14.0% a 10.8%.
+
+Optimizacion: La Fase 2 (point-wise) se reemplazo de KDTree `query_ball_point()` (2300 ms) por voxel grid 2D con percentiles vectorizados (74 ms), logrando 32x speedup con -0.2% F1 de diferencia.
+
+Nota: HCD (Height Coding Descriptor, ERASOR++) fue evaluado pero su impacto en la clasificacion binaria (obs_mask) es nulo sin filtro Bayesiano. HCD solo modula magnitudes de likelihood, que no cambian la clasificacion final por umbral. Se mantiene en el codigo como opcion pero no aporta mejora medible al pipeline actual.
 
 ### Pipeline Completo (Stage 2 → DBSCAN)
 
-| Secuencia | Precision | Recall | F1 |
-|-----------|-----------|--------|------|
-| Seq 04 (highway) | 88.6% | — | — |
-| Seq 00 (urbano) | — | — | 93.0% |
-| **Media** | **—** | **—** | **90.8%** |
+| Secuencia | Precision | Recall | F1 | IoU |
+|-----------|-----------|--------|------|------|
+| Seq 04 (highway) | 86.2% | 89.7% | 87.9% | 78.4% |
+| Seq 00 (urbano) | 97.1% | 89.0% | 92.8% | 86.6% |
+| **Media** | **91.6%** | **89.3%** | **90.4%** | **82.5%** |
+
+Timing por stage (media): Stage 1+2 = ~80 ms, Stage 3 (DBSCAN) = ~300 ms, **Total = ~377 ms**
 
 ---
 
@@ -190,7 +191,7 @@ HCD tiene mayor impacto en Seq 00 (urbano): reduce 11,861 FP en Stage 2 gracias 
 
 **Problema**: Patchwork++ ajusta planos por bins CZM. Si un bin contiene la base de una pared, el plano ajustado es vertical y la base se clasifica como ground. Afecta edificios, muros, y la parte baja de vehiculos.
 
-**Solucion**: Rechazo hibrido en dos fases. Fase 1 (bin-wise) detecta bins sospechosos por normal vertical insuficiente. Fase 2 (point-wise) refina con KDTree local para no rechazar bins completos. Rescata ~847 puntos/frame.
+**Solucion**: Rechazo hibrido en dos fases. Fase 1 (bin-wise) detecta bins sospechosos por normal vertical insuficiente. Fase 2 (point-wise) refina con voxel grid 2D (percentiles P95-P5) para no rechazar bins completos. Rescata ~847 puntos/frame. Optimizado de KDTree (2300ms) a voxel grid vectorizado (74ms).
 
 ### 2. Filtro Temporal Bayesiano No Mejora en KITTI
 
@@ -209,9 +210,9 @@ HCD tiene mayor impacto en Seq 00 (urbano): reduce 11,861 FP en Stage 2 gracias 
 | RangeNet++ | CNN | ~84% | Si | Si | Solo range image, pierde resolucion 3D |
 | Dewan et al. | Bayesian | ~83% | No | No | Range image (compresion 20:1), sin gamma, sin egomotion |
 | OccAM | Shadow | ~85% | No | Parcial | Solo validacion por sombra, sin temporal |
-| **Este trabajo** | **Geometria** | **90.8%** | **No** | **No** | Single-frame (sin filtro temporal) |
+| **Este trabajo** | **Geometria** | **90.4%** | **No** | **No** | Single-frame, ~377ms (sin filtro temporal) |
 
-**Mejoras respecto a Dewan et al.**: Per-point 3D (sin range image), HCD (ERASOR++), DBSCAN cluster filtering. El filtro temporal Bayesiano fue evaluado pero descartado por no aportar mejora en buen tiempo. Resultado: +7.8% F1.
+**Mejoras respecto a Dewan et al.**: Per-point 3D (sin range image), wall rejection hibrido con voxel grid, DBSCAN cluster filtering. El filtro temporal Bayesiano y HCD fueron evaluados pero descartados (ver ablation study). Resultado: +7.4% F1.
 
 ---
 
@@ -226,7 +227,9 @@ sota_idea/
 ├── stage1_visualizer.py                # Visualizacion Stage 1 aislado
 │
 ├── tests/
-│   ├── test_full_ablation.py           # Ablation acumulativo + HCD
+│   ├── test_full_ablation.py           # Ablation acumulativo por stages
+│   ├── test_stage1_ablation.py         # PW++ vanilla vs Wall Rejection + timing
+│   ├── test_dbscan_grid_search.py      # Grid search parametros DBSCAN
 │   ├── test_full_pipeline_both_sequences.py
 │   ├── test_patchwork_wall_problem.py
 │   └── archive/                        # Tests obsoletos
@@ -247,6 +250,6 @@ sota_idea/
 ## Papers Implementados
 
 1. **Patchwork++** (Lee et al., RA-L/IROS 2022) — Stage 1: Ground segmentation con CZM
-2. **ERASOR++** (Lim et al., ICRA 2023) — Stage 1: Height Coding Descriptor
+2. **ERASOR++** (Lim et al., ICRA 2023) — Evaluado: HCD no aporta mejora medible sin filtro Bayesiano (ver ablation study)
 3. **Dewan et al.** (IROS 2018) — Evaluado pero descartado: Bayesian temporal filter no mejora en buen tiempo (ver ablation study)
 4. **OccAM** (Schinagl et al., CVPR 2022) — Evaluado pero descartado: Shadow validation aporta solo +0.3% F1
