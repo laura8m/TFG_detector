@@ -53,8 +53,8 @@ Si intermedio       →  GROUND normal
 
 Los obstaculos reales forman clusters densos (coche ~200 pts, persona ~50 pts). Los falsos positivos son puntos dispersos sin estructura espacial.
 
-- DBSCAN (eps=0.5m, min_samples=5)
-- Clusters con >= 15 puntos → obstaculo real (se mantiene)
+- DBSCAN (eps=0.8m, min_samples=8) — parametros optimizados via grid search (108 combinaciones)
+- Clusters con >= 30 puntos → obstaculo real (se mantiene)
 - Clusters pequenos o ruido → FP probable (se elimina)
 
 **Metodo principal**: `stage3_cluster_filtering(points, stage2_result)` o `stage3_complete(points)` (pipeline completo)
@@ -146,7 +146,7 @@ Evaluado en KITTI Seq 00 (urbano, ~27 km/h) y Seq 04 (autopista, ~47 km/h), 10 f
 | Configuracion | Seq 04 F1 | Seq 00 F1 | Media F1 | Tiempo total |
 |---------------|-----------|-----------|----------|--------------|
 | Stage 2 (baseline single-frame) | 86.7% | 92.4% | 89.5% | ~87 ms |
-| **Stage 2 → 3 DBSCAN (pipeline final)** | **87.9%** | **92.8%** | **90.4%** | **~377 ms** |
+| **Stage 2 → 3 DBSCAN (pipeline final)** | **88.2%** | **93.0%** | **90.6%** | **~377 ms** |
 
 Nota: Se evaluaron tambien Stage 3 (Bayesian temporal, Dewan et al.) y Stage 4 (Shadow validation, OccAM) pero fueron descartados tras ablation study:
 
@@ -177,9 +177,9 @@ Nota: HCD (Height Coding Descriptor, ERASOR++) fue evaluado pero su impacto en l
 
 | Secuencia | Precision | Recall | F1 | IoU |
 |-----------|-----------|--------|------|------|
-| Seq 04 (highway) | 86.2% | 89.7% | 87.9% | 78.4% |
-| Seq 00 (urbano) | 97.1% | 89.0% | 92.8% | 86.6% |
-| **Media** | **91.6%** | **89.3%** | **90.4%** | **82.5%** |
+| Seq 04 (highway) | 83.9% | 93.0% | 88.2% | 78.9% |
+| Seq 00 (urbano) | 96.2% | 89.9% | 93.0% | 86.9% |
+| **Media** | **90.1%** | **91.5%** | **90.6%** | **82.9%** |
 
 Timing por stage (media): Stage 1+2 = ~80 ms, Stage 3 (DBSCAN) = ~300 ms, **Total = ~377 ms**
 
@@ -210,9 +210,9 @@ Timing por stage (media): Stage 1+2 = ~80 ms, Stage 3 (DBSCAN) = ~300 ms, **Tota
 | RangeNet++ | CNN | ~84% | Si | Si | Solo range image, pierde resolucion 3D |
 | Dewan et al. | Bayesian | ~83% | No | No | Range image (compresion 20:1), sin gamma, sin egomotion |
 | OccAM | Shadow | ~85% | No | Parcial | Solo validacion por sombra, sin temporal |
-| **Este trabajo** | **Geometria** | **90.4%** | **No** | **No** | Single-frame, ~377ms (sin filtro temporal) |
+| **Este trabajo** | **Geometria** | **90.6%** | **No** | **No** | Single-frame, ~377ms (sin filtro temporal) |
 
-**Mejoras respecto a Dewan et al.**: Per-point 3D (sin range image), wall rejection hibrido con voxel grid, DBSCAN cluster filtering. El filtro temporal Bayesiano y HCD fueron evaluados pero descartados (ver ablation study). Resultado: +7.4% F1.
+**Mejoras respecto a Dewan et al.**: Per-point 3D (sin range image), wall rejection hibrido con voxel grid, DBSCAN cluster filtering optimizado (grid search 108 combinaciones). El filtro temporal Bayesiano y HCD fueron evaluados pero descartados (ver ablation study). Resultado: +7.6% F1.
 
 ---
 
