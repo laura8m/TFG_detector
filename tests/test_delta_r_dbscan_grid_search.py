@@ -624,6 +624,10 @@ def main():
     parser.add_argument('--top', type=int, default=20)
     parser.add_argument('--eval_top', type=int, default=50,
                         help='Evaluar las N mejores de train en val (default: 50)')
+    parser.add_argument('--threshold_obs', type=float, default=-0.5,
+                        help='threshold_obs fijo para modo dbscan (default: -0.5)')
+    parser.add_argument('--threshold_void', type=float, default=0.8,
+                        help='threshold_void fijo para modo dbscan (default: 0.8)')
     args = parser.parse_args()
 
     n_workers = args.workers if args.workers > 0 else cpu_count()
@@ -706,8 +710,8 @@ def main():
     print("FASE 2: BASELINES")
     print(f"{'='*120}")
 
-    current_thr_obs = -0.5
-    current_thr_void = 0.8
+    current_thr_obs = args.threshold_obs
+    current_thr_void = args.threshold_void
     current_eps = 0.8
     current_min_samples = 8
     current_min_pts = 30

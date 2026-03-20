@@ -525,8 +525,9 @@ class LidarPipelineSuite:
         local_planes = {}
 
         if len(centers) > 0:
-            centers_arr = np.asarray(centers, dtype=np.float64)
-            normals_arr = np.asarray(normals, dtype=np.float64)
+            with np.errstate(invalid='ignore'):
+                centers_arr = np.asarray(centers, dtype=np.float64)
+                normals_arr = np.asarray(normals, dtype=np.float64)
 
             # Asegurar normales apunten hacia arriba
             flip = normals_arr[:, 2] < 0
