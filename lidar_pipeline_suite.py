@@ -58,29 +58,29 @@ class PipelineConfig:
     # Bandera de ablation: ¿Activar rechazo de paredes?
     enable_hybrid_wall_rejection: bool = True
 
-    wall_rejection_slope: float = 0.7  # Umbral nz (normal vertical)
-    # Si abs(n[2]) < 0.7 → plano inclinado (>45°) → sospecha de pared
+    wall_rejection_slope: float = 0.9  # Umbral nz (normal vertical) — optimizado grid search
+    # Si abs(n[2]) < 0.9 → plano inclinado → sospecha de pared
 
-    wall_height_diff_threshold: float = 0.3  # Delta-Z local (30cm)
-    # Si variación de altura en vecindad > 30cm → confirmada como pared
+    wall_height_diff_threshold: float = 0.2  # Delta-Z local (20cm) — optimizado grid search
+    # Si variación de altura en vecindad > 20cm → confirmada como pared
 
-    wall_kdtree_radius: float = 0.5  # Radio de vecindad local (m)
+    wall_kdtree_radius: float = 0.3  # Radio de vecindad local (m) — optimizado grid search
 
     # ========================================
     # STAGE 2: Detección de anomalías delta-r
     # ========================================
 
-    threshold_obs: float = -0.5  # Obstáculo positivo (m)
-    threshold_void: float = 0.8  # Void/depresión (m)
+    threshold_obs: float = -0.4  # Obstáculo positivo (m) — optimizado grid search
+    threshold_void: float = 1.2  # Void/depresión (m) — optimizado grid search
 
     # ========================================
     # STAGE 3: Filtrado por clustering DBSCAN
     # ========================================
 
     enable_cluster_filtering: bool = True  # Activar/desactivar Stage 3
-    cluster_eps: float = 0.8  # DBSCAN epsilon (m) - distancia máxima entre puntos del mismo cluster
-    cluster_min_samples: int = 8  # DBSCAN min_samples - densidad mínima para core point
-    cluster_min_pts: int = 30  # Puntos mínimos por cluster para ser considerado obstáculo real
+    cluster_eps: float = 0.8  # DBSCAN epsilon (m) — optimizado grid search
+    cluster_min_samples: int = 12  # DBSCAN min_samples — optimizado grid search
+    cluster_min_pts: int = 30  # Puntos mínimos por cluster — optimizado grid search
 
     # ========================================
     # GENERAL

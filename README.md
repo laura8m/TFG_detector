@@ -29,8 +29,8 @@ Separa los puntos ground de los non-ground.
 - **Patchwork++ (submodulo C++)**: Divide el espacio polar en 4 zonas concentricas (CZM). Para cada bin, ajusta un plano local con RANSAC. Un punto es ground si su distancia al plano es menor que el umbral (`th_dist = 0.2m`).
 
 - **Rechazo hibrido de paredes**: Patchwork++ clasifica mal las bases de paredes y objetos verticales como suelo. Se corrige en dos fases:
-  - Fase 1 (bin-wise): Si la normal del plano tiene `nz < 0.7`, el bin es sospechoso de ser pared
-  - Fase 2 (point-wise): Voxel grid 2D (celdas 1.0m) con percentiles P95-P5 vectorizados. Rechaza puntos individuales con `delta_Z > 0.3m`. Optimizado de KDTree (2300ms) a voxel grid (74ms) con resultados equivalentes
+  - Fase 1 (bin-wise): Si la normal del plano tiene `nz < 0.9`, el bin es sospechoso de ser pared
+  - Fase 2 (point-wise): Voxel grid 2D (celdas 1.0m) con percentiles P95-P5 vectorizados. Rechaza puntos individuales con `delta_Z > 0.2m`. Optimizado de KDTree (2300ms) a voxel grid (74ms) con resultados equivalentes
 
 **Metodo principal**: `stage1_complete(points)`
 
@@ -42,8 +42,8 @@ Clasifica cada punto comparando el rango medido con el rango esperado por el pla
 delta_r = r_medido - r_esperado
 r_esperado = -d / (n · direccion_rayo)
 
-Si delta_r < -0.5m  →  OBSTACULO (algo bloquea el rayo antes del plano)
-Si delta_r > +0.8m  →  VOID (hueco o depresion)
+Si delta_r < -0.4m  →  OBSTACULO (algo bloquea el rayo antes del plano)
+Si delta_r > +1.2m  →  VOID (hueco o depresion)
 Si intermedio       →  GROUND normal
 ```
 
@@ -54,7 +54,7 @@ Si intermedio       →  GROUND normal
 Los obstaculos reales forman clusters densos (coche ~200 pts, persona ~50 pts). Los falsos positivos son puntos dispersos sin estructura espacial.
 
 - Voxel downsampling (celdas 0.24m) antes de DBSCAN: reduce ~30k puntos a ~5k voxels centroides
-- DBSCAN (eps=0.8m, min_samples=4) sobre voxels — parametros optimizados via grid search (108 combinaciones)
+- DBSCAN (eps=0.8m, min_samples=6) sobre voxels — parametros optimizados via grid search en SemanticKITTI (2880 combinaciones, train/val split)
 - Clusters con >= 30 puntos originales → obstaculo real (se mantiene)
 - Clusters pequenos o ruido → FP probable (se elimina)
 
@@ -127,10 +127,11 @@ cd ~/lidar_ws/TFG-LiDAR-Geometry/sota_idea
 
 | Test | Comando | Que mide |
 |------|---------|----------|
+| **Grid search delta-r + DBSCAN** | `python3 tests/test_delta_r_dbscan_grid_search.py --mode full --workers 128 --stride 5` | Busca threshold_obs/void + eps/min_samples/min_pts optimos (2880 combos, train/val split) |
+| **Grid search wall rejection** | `python3 tests/test_wall_rejection_grid_search.py --workers 128 --stride 5` | Busca slope/dz/radius optimos (100 combos, train/val split) |
 | **Ablation completo** | `python3 tests/test_full_ablation.py --seq both --n_frames 10` | Contribucion de cada stage (acumulativo) |
 | **Pipeline completo** | `python3 tests/test_full_pipeline_both_sequences.py` | Pipeline en ambas secuencias con metricas completas |
 | **Ablation Stage 1** | `python3 tests/test_stage1_ablation.py --seq both --n_frames 10` | PW++ vanilla vs WR: ground seg + obs detection + timing |
-| **Grid search DBSCAN** | `python3 tests/test_dbscan_grid_search.py --seq both --n_frames 10` | Busca eps/min_samples/min_pts optimos para DBSCAN |
 | **Problema paredes** | `python3 tests/test_patchwork_wall_problem.py` | Cuantifica paredes mal clasificadas por Patchwork++ |
 
 Metricas: Precision, Recall, F1, IoU, FP, FN + timing desglosado por stage.
@@ -140,16 +141,36 @@ Ground truth: SemanticKITTI labels (terrain excluido, moving objects incluidos).
 
 ## Resultados
 
-Evaluado en KITTI Seq 00 (urbano, ~27 km/h) y Seq 04 (autopista, ~47 km/h), 10 frames.
+### Evaluacion con protocolo SemanticKITTI
 
-### Ablation Acumulativo
+Parametros optimizados con grid search riguroso (protocolo SemanticKITTI: train 00-07,09-10 / val 08):
+- **Delta-r + DBSCAN**: 2880 combinaciones (36 delta-r × 80 DBSCAN)
+- **Wall Rejection**: 100 combinaciones (5 slope × 5 dz × 4 radius)
+- Sin overfitting: mismos parametros optimos en train y val
 
-| Configuracion | Seq 04 F1 | Seq 00 F1 | Media F1 | Tiempo total |
-|---------------|-----------|-----------|----------|--------------|
-| Stage 2 (baseline single-frame) | 86.7% | 92.4% | 89.5% | ~87 ms |
-| **Stage 2 → 3 DBSCAN (pipeline final)** | **88.0%** | **92.9%** | **90.4%** | **~155 ms** |
+### Resultados en Val (seq 08) — resultado reportable
 
-Nota: Se evaluaron tambien Stage 3 (Bayesian temporal, Dewan et al.) y Stage 4 (Shadow validation, OccAM) pero fueron descartados tras ablation study:
+| Configuracion | F1 | IoU | P | R |
+|---------------|------|------|------|------|
+| PW++ vanilla (sin wall rejection) | 91.94% | 85.07% | — | — |
+| + Wall Rejection (slope=0.9, dz=0.2, r=0.3) | 92.20% | 85.53% | 90.34% | 94.14% |
+| + delta-r optimizado (thr_obs=-0.4, thr_void=1.2) | 92.20% | 85.53% | 90.34% | 94.14% |
+| **+ DBSCAN (eps=0.8, ms=12, mp=30) — pipeline final** | **93.25%** | **87.35%** | **91.18%** | **95.41%** |
+
+### Parametros optimos (grid search)
+
+| Parametro | Valor | Stage |
+|-----------|-------|-------|
+| wall_rejection_slope | 0.9 | Stage 1 |
+| wall_height_diff_threshold | 0.2 m | Stage 1 |
+| wall_kdtree_radius | 0.3 m | Stage 1 |
+| threshold_obs | -0.4 m | Stage 2 |
+| threshold_void | 1.2 m | Stage 2 |
+| cluster_eps | 0.8 m | Stage 3 |
+| cluster_min_samples | 12 | Stage 3 |
+| cluster_min_pts | 30 | Stage 3 |
+
+### Stages descartados tras ablation study
 
 | Configuracion descartada | Media F1 | Motivo |
 |--------------------------|----------|--------|
@@ -158,29 +179,6 @@ Nota: Se evaluaron tambien Stage 3 (Bayesian temporal, Dewan et al.) y Stage 4 (
 | Stage 2 → Bayes → Shadow → DBSCAN | 88.5% | Shadow apenas aporta (+0.3%), no justifica coste computacional |
 
 Ver `lidar_pipeline_suite_with_bayes.py` para la version con filtro Bayesiano.
-
-### Impacto de Wall Rejection (Stage 1 Ablation)
-
-Comparacion de Patchwork++ vanilla vs Stage 1 con rechazo de paredes, 10 frames por secuencia.
-
-| Configuracion | Mean Gnd F1 | Mean Obs F1 | Mean Leak % | Mean Stage 1 ms |
-|---------------|-------------|-------------|-------------|-----------------|
-| Patchwork++ vanilla | 95.3% | 89.1% | 12.5% | 26 ms |
-| **PW++ + Wall Rejection** | **96.0%** | **89.7%** | **9.1%** | **74 ms** |
-
-Wall Rejection reduce el obstacle leak (obstaculos GT clasificados como ground) de 12.5% a 9.1% y mejora Obs F1 en +0.6%. Mayor impacto en Seq 00 (urbano): leak baja de 14.0% a 10.8%.
-
-Optimizacion: La Fase 2 (point-wise) se reemplazo de KDTree `query_ball_point()` (2300 ms) por voxel grid 2D con percentiles vectorizados (74 ms), logrando 32x speedup con -0.2% F1 de diferencia.
-
-### Pipeline Completo (Stage 2 → DBSCAN)
-
-| Secuencia | Precision | Recall | F1 | IoU |
-|-----------|-----------|--------|------|------|
-| Seq 04 (highway) | 82.9% | 93.8% | 88.0% | 78.6% |
-| Seq 00 (urbano) | 95.9% | 90.1% | 92.9% | 86.7% |
-| **Media** | **89.4%** | **92.0%** | **90.4%** | **82.7%** |
-
-Timing por stage (media): Stage 1+2 = ~85 ms, Stage 3 (DBSCAN con voxel downsampling) = ~70 ms, **Total = ~155 ms (~6.5 Hz)**
 
 ---
 
@@ -203,15 +201,30 @@ Timing por stage (media): Stage 1+2 = ~85 ms, Stage 3 (DBSCAN con voxel downsamp
 
 ## Comparacion con Papers Base
 
-| Metodo | Tipo | F1 | GPU | Entrenamiento | Limitacion principal |
-|--------|------|------|-----|---------------|----------------------|
-| Cylinder3D | CNN | ~97% | Si | Si | Segmentacion semantica completa (19 clases), problema diferente |
-| RangeNet++ | CNN | ~84% | Si | Si | Solo range image, pierde resolucion 3D |
-| Dewan et al. | Bayesian | ~83% | No | No | Range image (compresion 20:1), sin gamma, sin egomotion |
-| OccAM | Shadow | ~85% | No | Parcial | Solo validacion por sombra, sin temporal |
-| **Este trabajo** | **Geometria** | **90.4%** | **No** | **No** | Single-frame, ~155ms / 6.5 Hz (sin filtro temporal) |
+### Papers base (no directamente comparables)
 
-**Mejoras respecto a Dewan et al.**: Per-point 3D (sin range image), wall rejection hibrido con voxel grid, DBSCAN cluster filtering con voxel downsampling (grid search 108 combinaciones). El filtro temporal Bayesiano fue evaluado pero descartado (ver ablation study). Resultado: +7.4% F1.
+Dewan et al. y OccAM usan datasets/metricas diferentes (KITTI Tracking, 3-class, range image). No se comparan numeros directamente. Este trabajo se inspira en ellos y aplica mejoras arquitectonicas:
+
+| Aspecto | Dewan et al. | Este trabajo |
+|---------|-------------|--------------|
+| Representacion | Range image 64×870 (compresion 20:1) | Per-point 3D (sin compresion) |
+| Ground seg. | No especificado | Patchwork++ + wall rejection hibrido |
+| Post-filtrado | Ninguno | DBSCAN cluster filtering |
+| Filtro temporal | Bayesian (componente principal) | Evaluado y descartado (ablation study) |
+| Dataset | KITTI Tracking (3 clases) | SemanticKITTI (binario, protocolo estandar) |
+
+### Comparacion directa (pendiente — mismo dataset, misma metrica)
+
+Evaluacion en SemanticKITTI seq 08 (val), metrica binaria obstaculo/no-obstaculo:
+
+| Metodo | Tipo | F1 (val) | IoU (val) | GPU | Entrenamiento |
+|--------|------|----------|-----------|-----|---------------|
+| RANSAC baseline | Geom. | pendiente | pendiente | No | No |
+| Patchwork++ vanilla | Geom. | 91.94% | 85.07% | No | No |
+| GroundGrid | Geom. | pendiente | pendiente | No | No |
+| **Este trabajo** | **Geom.** | **93.25%** | **87.35%** | **No** | **No** |
+| RangeNet++ | DL | pendiente | pendiente | Si | Si |
+| Cylinder3D | DL | pendiente | pendiente | Si | Si |
 
 ---
 
@@ -228,14 +241,15 @@ sota_idea/
 ├── tests/
 │   ├── test_full_ablation.py           # Ablation acumulativo por stages
 │   ├── test_stage1_ablation.py         # PW++ vanilla vs Wall Rejection + timing
-│   ├── test_dbscan_grid_search.py      # Grid search parametros DBSCAN
+│   ├── test_delta_r_dbscan_grid_search.py  # Grid search delta-r + DBSCAN (paralelo, train/val)
+│   ├── test_wall_rejection_grid_search.py  # Grid search wall rejection (paralelo, train/val)
 │   ├── test_full_pipeline_both_sequences.py
 │   ├── test_patchwork_wall_problem.py
 │   └── archive/                        # Tests obsoletos
 │
-├── data_kitti/
-│   ├── 00/ y 00_labels/                # KITTI seq 00 (urbano)
-│   └── 04/ y 04_labels/                # KITTI seq 04 (highway)
+├── data_odometry_velodyne/              # SemanticKITTI velodyne (seq 00-10)
+├── data_odometry_labels/                # SemanticKITTI labels (seq 00-10)
+├── data_paths.py                        # Modulo centralizado de rutas
 │
 ├── Paso_1/                             # Exploracion inicial de Patchwork++
 │   ├── run_patchwork_viz.sh
