@@ -86,9 +86,9 @@ class PipelineConfig:
     # ========================================
 
     enable_cluster_filtering: bool = True  # Activar/desactivar Stage 3
-    cluster_eps: float = 0.5  # DBSCAN epsilon (m) - distancia máxima entre puntos del mismo cluster
-    cluster_min_samples: int = 5  # DBSCAN min_samples - densidad mínima para core point
-    cluster_min_pts: int = 15  # Puntos mínimos por cluster para ser considerado obstáculo real
+    cluster_eps: float = 0.8  # DBSCAN epsilon (m) - distancia máxima entre puntos del mismo cluster
+    cluster_min_samples: int = 8  # DBSCAN min_samples - densidad mínima para core point
+    cluster_min_pts: int = 30  # Puntos mínimos por cluster para ser considerado obstáculo real
 
     # ========================================
     # GENERAL
