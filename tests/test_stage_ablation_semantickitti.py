@@ -221,14 +221,10 @@ def main():
                 pred_mask = np.array([i not in ground_idx for i in range(len(pts))], dtype=bool)
 
             elif config_name == 'PW++ + Wall Rejection':
-                # PW++ + WR: non-ground + wall rejected = obstáculo
-                ground_pts, n_pp, d_pp, rejected_idx = pipeline.stage1_complete(pts)
-                ground_idx_set = set(pipeline.patchwork.getGroundIndices())
-                pred_mask = np.array([j not in ground_idx_set for j in range(len(pts))], dtype=bool)
-                # Añadir paredes rechazadas como obstáculo
-                if len(rejected_idx) > 0:
-                    valid_rej = rejected_idx[rejected_idx < len(pts)]
-                    pred_mask[valid_rej] = True
+                # PW++ + WR: nonground_indices (ya incluye paredes rechazadas)
+                s1 = pipeline.stage1_complete(pts)
+                pred_mask = np.zeros(len(pts), dtype=bool)
+                pred_mask[s1['nonground_indices']] = True
 
             elif config_name == 'PW++ + WR + delta-r':
                 # Pipeline Stage 1+2 (sin DBSCAN)
