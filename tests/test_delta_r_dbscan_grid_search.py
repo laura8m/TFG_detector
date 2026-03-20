@@ -50,11 +50,16 @@ from data_paths import (get_scan_file, get_label_file, get_velodyne_dir,
 # ========================================
 
 def discover_sequences():
-    """Encuentra secuencias que tienen tanto velodyne como labels."""
+    """Encuentra secuencias que tienen tanto velodyne como labels con archivos reales."""
     if not VELODYNE_ROOT.exists() or not LABELS_ROOT.exists():
         return []
     vel_seqs = {d.name for d in VELODYNE_ROOT.iterdir() if d.is_dir()}
-    lab_seqs = {d.name for d in LABELS_ROOT.iterdir() if d.is_dir()}
+    lab_seqs = set()
+    for d in LABELS_ROOT.iterdir():
+        if d.is_dir():
+            lab_dir = d / "labels"
+            if lab_dir.exists() and any(lab_dir.glob('*.label')):
+                lab_seqs.add(d.name)
     seqs = sorted(vel_seqs & lab_seqs)
     return seqs
 
