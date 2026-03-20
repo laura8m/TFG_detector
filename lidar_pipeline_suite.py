@@ -32,13 +32,13 @@ class PipelineConfig:
     Diseñada para facilitar ablation studies mediante banderas booleanas por etapa.
 
     Etapas:
-    - Stage 1: Segmentación de suelo (Patchwork++) + HCD
+    - Stage 1: Segmentación de suelo (Patchwork++) + rechazo de paredes
     - Stage 2: Detección de anomalías delta-r
     - Stage 3: Filtrado por clustering DBSCAN
     """
 
     # ========================================
-    # STAGE 1: Segmentación de suelo + HCD
+    # STAGE 1: Segmentación de suelo + rechazo de paredes
     # ========================================
 
     # === Patchwork++ Base ===
@@ -66,18 +66,10 @@ class PipelineConfig:
 
     wall_kdtree_radius: float = 0.5  # Radio de vecindad local (m)
 
-    # === Height Coding Descriptor (ERASOR++) ===
-    # Bandera de ablation: ¿Activar HCD?
-    enable_hcd: bool = True
-
-    # Parámetros HCD
-    hcd_z_rel_scale: float = 0.3  # Escala normalización altura relativa
-
     # ========================================
     # STAGE 2: Detección de anomalías delta-r
     # ========================================
 
-    enable_hcd_fusion: bool = True  # Fusionar HCD con delta-r
     threshold_obs: float = -0.5  # Obstáculo positivo (m)
     threshold_void: float = 0.8  # Void/depresión (m)
 
@@ -106,8 +98,8 @@ class LidarPipelineSuite:
     Suite modular de procesamiento LiDAR 3D para detección de obstáculos.
 
     Implementa un pipeline secuencial de 3 etapas:
-      1. Segmentación de suelo (Patchwork++ + rechazo de paredes + HCD)
-      2. Detección de anomalías delta-r con fusión HCD opcional
+      1. Segmentación de suelo (Patchwork++ + rechazo de paredes)
+      2. Detección de anomalías delta-r
       3. Filtrado por clustering DBSCAN (elimina ruido disperso)
 
     Cada etapa puede activarse/desactivarse mediante PipelineConfig para
@@ -115,8 +107,6 @@ class LidarPipelineSuite:
 
     Estado compartido entre etapas:
     - self.local_planes: Planos locales por bin CZM para cálculo de delta-r
-    - self.hcd: Height Coding Descriptor por punto ground
-
     Nota: El filtro temporal Bayesiano (Dewan et al.) se eliminó tras ablation
     study que demostró que no mejora resultados en KITTI (buen tiempo).
     Ver lidar_pipeline_suite_with_bayes.py para la versión con Bayes.
@@ -143,8 +133,6 @@ class LidarPipelineSuite:
 
         # === ESTADO COMPARTIDO ===
         self.local_planes = {}  # Dict[(z,r,s)] -> (normal, d)
-        self.hcd = None  # Height Coding Descriptor (N_ground,)
-
         # === INICIALIZAR SUBMÓDULOS ===
         self._init_patchwork()
         self.initialize_czm_params()
@@ -152,7 +140,6 @@ class LidarPipelineSuite:
         if config.verbose:
             print("[INFO] LidarPipelineSuite inicializado")
             print(f"  - Rechazo de paredes: {'SI' if config.enable_hybrid_wall_rejection else 'NO'}")
-            print(f"  - HCD (ERASOR++): {'SI' if config.enable_hcd else 'NO'}")
             print(f"  - Filtrado por clustering: {'SI' if config.enable_cluster_filtering else 'NO'}")
 
     # ========================================
@@ -257,46 +244,35 @@ class LidarPipelineSuite:
         theta = np.arctan2(y, x)
         theta = np.where(theta < 0, theta + 2 * np.pi, theta)
 
-        zone_idx = np.full_like(r, -1, dtype=np.int32)
-        ring_idx = np.full_like(r, -1, dtype=np.int32)
-        sector_idx = np.full_like(r, -1, dtype=np.int32)
+        N = len(r)
+        zone_idx = np.full(N, -1, dtype=np.int32)
+        ring_idx = np.full(N, -1, dtype=np.int32)
+        sector_idx = np.full(N, -1, dtype=np.int32)
 
-        valid = (r > self.config.min_range) & (r <= self.config.max_range)
+        # Usar digitize para asignar zonas de golpe
+        zone_bounds = [self.min_ranges[0], self.min_ranges[1], self.min_ranges[2], self.min_ranges[3], self.config.max_range + 0.01]
+        zone_raw = np.digitize(r, zone_bounds) - 1  # 0-3 para válidos
+        valid = (zone_raw >= 0) & (zone_raw <= 3)
 
-        # Zona 0
-        mask_z0 = valid & (r < self.min_ranges[1])
-        if np.any(mask_z0):
-            zone_idx[mask_z0] = 0
-            ring_idx[mask_z0] = ((r[mask_z0] - self.min_ranges[0]) / self.ring_sizes[0]).astype(np.int32)
-            sector_idx[mask_z0] = (theta[mask_z0] / self.sector_sizes[0]).astype(np.int32)
+        if np.any(valid):
+            vi = np.where(valid)[0]
+            z_v = zone_raw[vi]
+            zone_idx[vi] = z_v
 
-        # Zona 1
-        mask_z1 = valid & (r >= self.min_ranges[1]) & (r < self.min_ranges[2])
-        if np.any(mask_z1):
-            zone_idx[mask_z1] = 1
-            ring_idx[mask_z1] = ((r[mask_z1] - self.min_ranges[1]) / self.ring_sizes[1]).astype(np.int32)
-            sector_idx[mask_z1] = (theta[mask_z1] / self.sector_sizes[1]).astype(np.int32)
+            # Arrays de parámetros por zona para lookup vectorizado
+            min_ranges_arr = np.array(self.min_ranges, dtype=np.float64)
+            ring_sizes_arr = np.array(self.ring_sizes, dtype=np.float64)
+            sector_sizes_arr = np.array(self.sector_sizes, dtype=np.float64)
+            max_rings_arr = np.array(self.config.num_rings_each_zone, dtype=np.int32)
+            max_sectors_arr = np.array(self.config.num_sectors_each_zone, dtype=np.int32)
 
-        # Zona 2
-        mask_z2 = valid & (r >= self.min_ranges[2]) & (r < self.min_ranges[3])
-        if np.any(mask_z2):
-            zone_idx[mask_z2] = 2
-            ring_idx[mask_z2] = ((r[mask_z2] - self.min_ranges[2]) / self.ring_sizes[2]).astype(np.int32)
-            sector_idx[mask_z2] = (theta[mask_z2] / self.sector_sizes[2]).astype(np.int32)
+            # Vectorizado: ring y sector para todos los puntos válidos a la vez
+            r_base = min_ranges_arr[z_v]
+            r_size = ring_sizes_arr[z_v]
+            s_size = sector_sizes_arr[z_v]
 
-        # Zona 3
-        mask_z3 = valid & (r >= self.min_ranges[3])
-        if np.any(mask_z3):
-            zone_idx[mask_z3] = 3
-            ring_idx[mask_z3] = ((r[mask_z3] - self.min_ranges[3]) / self.ring_sizes[3]).astype(np.int32)
-            sector_idx[mask_z3] = (theta[mask_z3] / self.sector_sizes[3]).astype(np.int32)
-
-        # Recortar índices por seguridad
-        for z in range(4):
-            mask = (zone_idx == z)
-            if np.any(mask):
-                ring_idx[mask] = np.clip(ring_idx[mask], 0, self.config.num_rings_each_zone[z] - 1)
-                sector_idx[mask] = np.clip(sector_idx[mask], 0, self.config.num_sectors_each_zone[z] - 1)
+            ring_idx[vi] = np.clip(((r[vi] - r_base) / r_size).astype(np.int32), 0, max_rings_arr[z_v] - 1)
+            sector_idx[vi] = np.clip((theta[vi] / s_size).astype(np.int32), 0, max_sectors_arr[z_v] - 1)
 
         return zone_idx, ring_idx, sector_idx
 
@@ -347,7 +323,7 @@ class LidarPipelineSuite:
         return (z, r_idx, s_idx)
 
     # ========================================
-    # STAGE 1: SEGMENTACIÓN DE SUELO + HCD
+    # STAGE 1: SEGMENTACIÓN DE SUELO + RECHAZO DE PAREDES
     # ========================================
 
     @staticmethod
@@ -421,43 +397,52 @@ class LidarPipelineSuite:
         # Crear bin_id único: (zone * 128) + (ring * 32) + sector
         bin_id = zone_idx * 128 + ring_idx * 32 + sector_idx
 
-        # --- Fase 2: Identificar bins con variación vertical sospechosa ---
+        # --- Fase 2: Identificar bins con variación vertical sospechosa (vectorizado) ---
 
-        suspect_bins = []
-        suspect_bin_masks = {}
-        unique_bins = np.unique(bin_id)
+        # Agrupar por bin_id usando sort + reduceat
+        sort_bin = np.argsort(bin_id)
+        sorted_bins = bin_id[sort_bin]
+        sorted_z_bins = z[sort_bin]
 
-        for bid in unique_bins:
-            mask = bin_id == bid
-            indices_in_bin = np.where(mask)[0]
+        unique_bins, bin_starts = np.unique(sorted_bins, return_index=True)
+        bin_ends = np.append(bin_starts[1:], len(sorted_bins))
+        bin_counts = bin_ends - bin_starts
 
-            if len(indices_in_bin) < min_neighbors:
-                continue  # Bin con pocos puntos, saltar
+        # Ordenar z dentro de cada grupo para percentiles rápidos
+        sorted_z_for_pct = sorted_z_bins.copy()
+        for i in range(len(bin_starts)):
+            s, e = bin_starts[i], bin_ends[i]
+            sorted_z_for_pct[s:e] = np.sort(sorted_z_for_pct[s:e])
 
-            # Análisis delta-Z del bin completo
-            z_bin = z[mask]
+        # P5/P95 por bin (vectorizado)
+        enough_mask = bin_counts >= min_neighbors
+        if use_percentiles:
+            p5_idx = np.clip((0.05 * (bin_counts - 1)).astype(np.int32), 0, bin_counts - 1)
+            p95_idx = np.clip((0.95 * (bin_counts - 1)).astype(np.int32), 0, bin_counts - 1)
+            bin_p5 = sorted_z_for_pct[bin_starts + p5_idx]
+            bin_p95 = sorted_z_for_pct[bin_starts + p95_idx]
+            bin_delta_z = bin_p95 - bin_p5
+        else:
+            # np.minimum.reduceat/maximum.reduceat
+            bin_z_max = np.maximum.reduceat(sorted_z_bins, bin_starts)
+            bin_z_min = np.minimum.reduceat(sorted_z_bins, bin_starts)
+            bin_delta_z = bin_z_max - bin_z_min
 
-            if use_percentiles:
-                z_high = np.percentile(z_bin, 95)
-                z_low = np.percentile(z_bin, 5)
-                delta_z = z_high - z_low
-            else:
-                delta_z = z_bin.max() - z_bin.min()
+        suspect_mask_bins = enough_mask & (bin_delta_z > delta_z_threshold)
 
-            # Si el bin tiene escalón vertical, MARCAR como sospechoso (NO rechazar aún)
-            if delta_z > delta_z_threshold:
-                suspect_bins.append(bid)
-                suspect_bin_masks[bid] = mask
+        # Recoger puntos sospechosos (vectorizado)
+        suspect_indices_list = []
+        suspect_bin_indices = np.where(suspect_mask_bins)[0]
+        for bi in suspect_bin_indices:
+            s, e = bin_starts[bi], bin_ends[bi]
+            suspect_indices_list.append(sort_bin[s:e])
 
         # --- Fase 3: Refinamiento punto a punto con voxel grid (O(N)) ---
 
         rejected_mask = np.zeros(len(ground_pts), dtype=bool)
 
-        if len(suspect_bins) > 0:
-            # Recoger TODOS los índices de puntos sospechosos
-            suspect_indices = np.concatenate([
-                np.where(suspect_bin_masks[bid])[0] for bid in suspect_bins
-            ])
+        if len(suspect_indices_list) > 0:
+            suspect_indices = np.concatenate(suspect_indices_list)
 
             if len(suspect_indices) > 0:
                 # Voxel grid 2D (XY): celdas de 1.0m (= diámetro del radio KDTree)
@@ -470,10 +455,11 @@ class LidarPipelineSuite:
                 # Hash espacial → clave única por celda
                 voxel_key = vox_x * 100003 + vox_y
 
-                # Ordenar por clave de voxel para agrupar z values
-                sort_idx = np.argsort(voxel_key)
+                # Ordenar por (voxel_key, z) para obtener z ordenado dentro de grupos
+                # Doble sort: primero por key, luego estable por z dentro de cada key
+                sort_idx = np.lexsort((gz, voxel_key))
                 sorted_keys = voxel_key[sort_idx]
-                sorted_z = gz[sort_idx].copy()
+                sorted_z = gz[sort_idx]
 
                 # Límites de cada grupo (voxel)
                 change_idx = np.where(np.diff(sorted_keys) != 0)[0] + 1
@@ -482,12 +468,7 @@ class LidarPipelineSuite:
                 unique_keys = sorted_keys[group_starts]
                 counts = group_ends - group_starts
 
-                # Ordenar z dentro de cada grupo para indexar percentiles
-                for i in range(len(group_starts)):
-                    s, e = group_starts[i], group_ends[i]
-                    sorted_z[s:e] = np.sort(sorted_z[s:e])
-
-                # P5 y P95 por voxel (indexar en z ordenado)
+                # P5 y P95 por voxel (z ya ordenado dentro de cada grupo por lexsort)
                 p5_idx = np.clip((0.05 * (counts - 1)).astype(np.int32), 0, counts - 1)
                 p95_idx = np.clip((0.95 * (counts - 1)).astype(np.int32), 0, counts - 1)
                 voxel_p5 = sorted_z[group_starts + p5_idx]
@@ -540,25 +521,32 @@ class LidarPipelineSuite:
         centers = self.patchwork.getCenters()
         normals = self.patchwork.getNormals()
 
-        # 2. Construir lookup de planos locales
+        # 2. Construir lookup de planos locales (vectorizado)
         local_planes = {}
 
         if len(centers) > 0:
-            for i in range(len(centers)):
-                c = centers[i]
-                n = normals[i]
+            centers_arr = np.asarray(centers, dtype=np.float64)
+            normals_arr = np.asarray(normals, dtype=np.float64)
 
-                bin_id = self.get_czm_bin_scalar(c[0], c[1])
+            # Asegurar normales apunten hacia arriba
+            flip = normals_arr[:, 2] < 0
+            normals_arr[flip] *= -1
 
-                # Asegurar que la normal apunte hacia arriba
-                if n[2] < 0:
-                    n = -n
+            # Filtrar planos con nz suficiente (no paredes)
+            valid_nz = normals_arr[:, 2] >= self.config.wall_rejection_slope
 
-                # Almacenar plano (solo si es suficientemente horizontal)
-                # Planos con nz < 0.7 son verticales (paredes) → no son suelo válido
-                if bin_id is not None and n[2] >= self.config.wall_rejection_slope:
-                    d = -np.dot(n, c)
-                    local_planes[bin_id] = (n, d)
+            # Obtener bins vectorizado
+            z_idx, r_idx, s_idx = self.get_czm_bin(centers_arr[:, 0], centers_arr[:, 1])
+            valid_bin = (z_idx >= 0) & valid_nz
+
+            # Calcular d vectorizado: d = -(n . c)
+            d_arr = -np.sum(normals_arr * centers_arr, axis=1)
+
+            # Construir dict (solo ~400 bins, loop rápido sobre resultados filtrados)
+            valid_indices = np.where(valid_bin)[0]
+            for i in valid_indices:
+                bin_id = (int(z_idx[i]), int(r_idx[i]), int(s_idx[i]))
+                local_planes[bin_id] = (normals_arr[i].astype(np.float32), float(d_arr[i]))
 
         # Almacenar para otras etapas
         self.local_planes = local_planes
@@ -644,102 +632,13 @@ class LidarPipelineSuite:
 
         return n_per_point, d_per_point
 
-    def compute_height_coding_descriptor(
-        self,
-        points: np.ndarray,
-        ground_indices: np.ndarray
-    ) -> np.ndarray:
-        """
-        Calcula el Height Coding Descriptor (HCD) basado en ERASOR++.
-
-        El HCD codifica la geometría vertical de cada punto ground midiendo
-        su altura relativa al plano local estimado. Permite distinguir entre
-        superficies planas (rampas suaves), bordes verticales (bordillos) y
-        terreno rugoso.
-
-        Interpretación del descriptor:
-        - HCD alto (z_rel alto) → estructura vertical (bordillo, escalón)
-        - HCD bajo (z_rel bajo) → rampa suave, terreno plano
-        - HCD negativo → punto por debajo del plano local (depresión)
-
-        Versión simplificada vectorizada que solo usa z_rel normalizado con tanh
-        para evitar el coste O(N^2) de queries KDTree por punto.
-
-        Args:
-            points: (N, 3) todos los puntos
-            ground_indices: (M,) índices de puntos ground
-
-        Returns:
-            hcd: (M,) descriptor por punto ground en rango [-1, 1]
-        """
-        if not self.config.enable_hcd:
-            return np.zeros(len(ground_indices))
-
-        ground_pts = points[ground_indices]
-        hcd = np.zeros(len(ground_pts))
-
-        # 1. Obtener bins de todos los puntos ground (vectorizado)
-        z_idx, r_idx, s_idx = self.get_czm_bin(ground_pts[:, 0], ground_pts[:, 1])
-
-        # 2. Crear tabla de lookup de planos
-        planes_table_n = np.zeros((4, 4, 54, 3), dtype=np.float32)
-        planes_table_d = np.zeros((4, 4, 54), dtype=np.float32)
-
-        # Rellenar con plano global por defecto
-        planes_table_n[:, :, :, 2] = 1.0  # nz = 1
-        planes_table_d[:, :, :] = self.config.sensor_height
-
-        # Rellenar con planos locales
-        for bin_id, (n_loc, d_loc) in self.local_planes.items():
-            z_b, r_b, s_b = bin_id
-            if 0 <= z_b < 4 and 0 <= r_b < 4 and 0 <= s_b < 54:
-                planes_table_n[z_b, r_b, s_b] = n_loc
-                planes_table_d[z_b, r_b, s_b] = d_loc
-
-        # 3. Lookup vectorizado de planos
-        valid_mask = (z_idx >= 0) & (r_idx >= 0) & (s_idx >= 0)
-
-        z_plane = np.full(len(ground_pts), self.config.sensor_height, dtype=np.float32)
-
-        if np.any(valid_mask):
-            valid_idx = np.where(valid_mask)[0]
-            z_v = z_idx[valid_idx]
-            r_v = r_idx[valid_idx]
-            s_v = s_idx[valid_idx]
-
-            n_local = planes_table_n[z_v, r_v, s_v]  # (K, 3)
-            d_local = planes_table_d[z_v, r_v, s_v]  # (K,)
-
-            # Calcular z_plane para cada punto: z_plane = -(n.x * x + n.y * y + d) / n.z
-            pts_valid = ground_pts[valid_idx]
-            nz = n_local[:, 2]
-            nz_safe = np.where(np.abs(nz) > 1e-3, nz, 1.0)
-
-            z_plane[valid_idx] = -(
-                n_local[:, 0] * pts_valid[:, 0] +
-                n_local[:, 1] * pts_valid[:, 1] +
-                d_local
-            ) / nz_safe
-
-        # 4. Calcular z_rel (altura relativa al plano local)
-        z_rel = ground_pts[:, 2] - z_plane
-
-        # 5. HCD simplificado (z_rel normalizado con tanh)
-        hcd = np.tanh(z_rel / self.config.hcd_z_rel_scale)
-
-        if self.config.verbose:
-            print(f"[Stage 1 HCD] Media: {np.mean(hcd):.3f} +/- {np.std(hcd):.3f}")
-
-        return hcd
-
     def stage1_complete(self, points: np.ndarray) -> Dict:
         """
-        Ejecuta Stage 1 completo: segmentación de suelo + rechazo de paredes + HCD.
+        Ejecuta Stage 1 completo: segmentación de suelo + rechazo de paredes.
 
-        Orquesta las tres sub-etapas de Stage 1:
+        Orquesta las dos sub-etapas de Stage 1:
         1. Patchwork++ para segmentación base ground/nonground
         2. Rechazo híbrido de paredes punto a punto (si habilitado)
-        3. Cálculo del Height Coding Descriptor (si habilitado)
 
         Las paredes rechazadas se reclasifican como nonground (son obstáculos).
 
@@ -751,7 +650,6 @@ class LidarPipelineSuite:
             - ground_indices: (M,) índices ground limpios (sin paredes)
             - nonground_indices: (K,) índices nonground (incluyendo paredes)
             - local_planes: Dict de planos locales por bin CZM
-            - hcd: (M,) Height Coding Descriptor
             - rejected_walls: (W,) índices de paredes rechazadas
             - n_per_point, d_per_point: normales y distancias per-point
             - timing_ms: tiempo de ejecución (ms)
@@ -766,20 +664,18 @@ class LidarPipelineSuite:
         ground_indices = self.patchwork.getGroundIndices()
         nonground_indices = self.patchwork.getNongroundIndices()
 
-        # Filtrar ground removiendo wall points (vectorizado)
+        # Filtrar ground removiendo wall points
         # Las paredes pasan a nonground (son obstáculos, no desaparecen)
         if len(rejected_wall_indices) > 0:
-            rejected_mask = np.isin(ground_indices, rejected_wall_indices)
-            clean_ground = ground_indices[~rejected_mask]
+            # Máscara booleana sobre punto global O(N) — más rápido que np.isin para N grande
+            rejected_mask_full = np.zeros(len(points), dtype=bool)
+            rejected_mask_full[rejected_wall_indices] = True
+            clean_ground = ground_indices[~rejected_mask_full[ground_indices]]
             nonground_indices = np.concatenate([nonground_indices, rejected_wall_indices])
         else:
             clean_ground = ground_indices
 
-        # 3. Height Coding Descriptor
-        hcd = self.compute_height_coding_descriptor(points, clean_ground)
-
         # Almacenar estado
-        self.hcd = hcd
         self.rejected_wall_indices = rejected_wall_indices
 
         timing = (time.time() - t0) * 1000  # ms
@@ -792,7 +688,6 @@ class LidarPipelineSuite:
             'ground_indices': clean_ground,
             'nonground_indices': nonground_indices,
             'local_planes': self.local_planes,
-            'hcd': hcd,
             'rejected_walls': rejected_wall_indices,
             'n_per_point': n_per_point,
             'd_per_point': d_per_point,
@@ -809,10 +704,9 @@ class LidarPipelineSuite:
         ground_indices: np.ndarray,
         n_per_point: np.ndarray,
         d_per_point: np.ndarray,
-        hcd: Optional[np.ndarray] = None
     ) -> Dict:
         """
-        Stage 2: Detección de anomalías delta-r con fusión HCD opcional.
+        Stage 2: Detección de anomalías delta-r.
 
         Mide la desviación entre el rango medido y el rango esperado por el
         plano local:
@@ -821,21 +715,16 @@ class LidarPipelineSuite:
         Donde r_esperado se calcula proyectando el rayo sobre el plano local:
             r_esperado = -d / (n . dirección_rayo)
 
-        Clasificación base:
+        Clasificación:
             delta_r < umbral_obs → Obstáculo positivo (más cerca que el plano)
             delta_r > umbral_void → Void/depresión (más lejos que el plano)
             Intermedio → Ground normal
-
-        Si HCD está disponible, modula la likelihood según la geometría vertical:
-        obstáculos con HCD alto reciben mayor confianza, ground plano recibe
-        mayor supresión.
 
         Args:
             points: (N, 3) todos los puntos
             ground_indices: (M,) índices de puntos ground
             n_per_point: (N, 3) normales por punto
             d_per_point: (N,) offsets del plano por punto
-            hcd: (M,) Height Coding Descriptor (opcional)
 
         Returns:
             Dict con:
@@ -852,127 +741,47 @@ class LidarPipelineSuite:
         N = len(points)
 
         # ========================================
-        # 1. CALCULAR r_medido (rango real)
+        # 1. CALCULAR r_medido y dirección del rayo
         # ========================================
-        r_measured = np.sqrt(np.sum(points**2, axis=1))
-
-        # ========================================
-        # 2. CALCULAR r_esperado (rango esperado del plano)
-        # ========================================
-        # Proyectar rayo sobre plano local: r_exp = -d / (n . dir_rayo)
-        ray_dir = points / r_measured[:, np.newaxis]  # (N, 3) normalizado
-        dot_prod = np.sum(ray_dir * n_per_point, axis=1)  # (N,)
-
-        # Evitar división por cero (rayos paralelos al plano)
-        valid_dot = dot_prod < -1e-3  # Solo proyecciones válidas (hacia abajo)
-
-        # Inicializar r_esperado con valor grande (cielo/inválido)
-        r_expected = np.full(N, 999.9, dtype=np.float32)
-
-        # Calcular r_esperado solo para proyecciones válidas
-        r_expected[valid_dot] = -d_per_point[valid_dot] / dot_prod[valid_dot]
+        r_measured = np.linalg.norm(points, axis=1)
 
         # ========================================
-        # 3. CALCULAR delta_r
+        # 2. CALCULAR r_esperado y delta_r (fusionado, sin arrays intermedios)
         # ========================================
-        delta_r = r_measured - r_expected
+        # dot_prod = (point / |point|) . normal = (point . normal) / |point|
+        dot_prod = np.einsum('ij,ij->i', points, n_per_point) / np.maximum(r_measured, 1e-6)
 
-        # Recortar extremos (evitar outliers numéricos)
-        delta_r = np.clip(delta_r, -20.0, 10.0)
+        # r_expected = -d / dot_prod (solo donde dot_prod < 0)
+        # delta_r = r_measured - r_expected = r_measured + d / dot_prod
+        safe_dot = np.where(dot_prod < -1e-3, dot_prod, -1e-3)
+        delta_r = np.clip(r_measured + d_per_point / safe_dot, -20.0, 10.0)
 
         # ========================================
-        # 4. CLASIFICACIÓN BASE (sin HCD)
+        # 3. CLASIFICACIÓN DIRECTA
         # ========================================
         threshold_obs = self.config.threshold_obs
         threshold_void = self.config.threshold_void
 
-        # Máscaras base (para likelihood inicial)
-        obs_region = delta_r < threshold_obs
-        void_region = delta_r > threshold_void
-        ground_region = (~obs_region) & (~void_region)
+        obs_mask_final = (delta_r < threshold_obs) | (delta_r > threshold_void)
+        void_mask_final = delta_r > threshold_void
 
-        # Likelihood base (log-odds)
-        likelihood_base = np.zeros(N, dtype=np.float32)
-        likelihood_base[obs_region] = +2.0   # Obstáculo
-        likelihood_base[void_region] = +1.5  # Void
-        likelihood_base[ground_region] = -2.0  # Ground
-
-        # ========================================
-        # 5. FUSIÓN HCD (opcional)
-        # ========================================
-        if hcd is not None and self.config.enable_hcd:
-            # HCD solo disponible para ground points
-            # Crear array completo con HCD=0 para non-ground
-            hcd_full = np.zeros(N, dtype=np.float32)
-            hcd_full[ground_indices] = hcd
-
-            # Modular likelihood según HCD (vectorizado con np.where)
-            likelihood_hcd = likelihood_base.copy()
-
-            # CASO 1: Obstáculos - HCD alto→+4.0, medio→+3.0, bajo→+2.0
-            obs_h = hcd_full[obs_region]
-            likelihood_hcd[obs_region] = np.where(
-                obs_h > 0.5, 4.0, np.where(obs_h > 0.2, 3.0, 2.0))
-
-            # CASO 2: Voids - HCD negativo→+3.0, neutro→+1.5
-            void_h = hcd_full[void_region]
-            likelihood_hcd[void_region] = np.where(void_h < -0.3, 3.0, 1.5)
-
-            # CASO 3: Ground - HCD plano→-2.5, con textura→-1.5
-            gnd_h = hcd_full[ground_region]
-            likelihood_hcd[ground_region] = np.where(
-                np.abs(gnd_h) < 0.2, -2.5, -1.5)
-
-            likelihood_final = likelihood_hcd
-
-            if self.config.verbose:
-                n_boosted = np.sum(likelihood_hcd > likelihood_base)
-                print(f"[Stage 2 Fusión HCD] {n_boosted} puntos con likelihood aumentada")
-
-        else:
-            likelihood_final = likelihood_base
-
-        # ========================================
-        # 6. GENERAR MÁSCARAS FINALES USANDO LIKELIHOOD
-        # ========================================
-        # Umbral de likelihood para clasificar como obstáculo
-        likelihood_threshold_obs = 1.0
-        likelihood_threshold_gnd = -1.0
-
-        obs_mask_final = likelihood_final > likelihood_threshold_obs
-        ground_mask_final = likelihood_final < likelihood_threshold_gnd
-        void_mask_final = void_region  # Mantener void mask original
-
-        # Forzar paredes rechazadas en Stage 1 como obstáculos
-        # Evita que delta_r~0 (plano vertical) las reclasifique como ground
+        # Forzar paredes rechazadas como obstáculos
         if hasattr(self, 'rejected_wall_indices') and len(self.rejected_wall_indices) > 0:
-            wall_mask = np.zeros(N, dtype=bool)
             valid_idx = self.rejected_wall_indices[self.rejected_wall_indices < N]
-            wall_mask[valid_idx] = True
-            obs_mask_final[wall_mask] = True
-            ground_mask_final[wall_mask] = False
+            obs_mask_final[valid_idx] = True
 
-        uncertain_mask = (~obs_mask_final) & (~ground_mask_final) & (~void_mask_final)
+        ground_mask_final = ~obs_mask_final
 
-        # ========================================
-        # 7. MÉTRICAS Y RETORNO
-        # ========================================
-        n_obs = np.sum(obs_mask_final)
-        n_void = np.sum(void_mask_final)
-        n_ground = np.sum(ground_mask_final)
-        n_uncertain = np.sum(uncertain_mask)
+        # Likelihood (solo para compatibilidad, sin coste extra)
+        likelihood_final = np.where(obs_mask_final, 2.0,
+                           np.where(void_mask_final, 1.5, -2.0)).astype(np.float32)
 
         t_end = time.time()
         timing_ms = (t_end - t_start) * 1000.0
 
         if self.config.verbose:
-            hcd_status = "SI" if (hcd is not None and self.config.enable_hcd) else "NO"
             print(f"[Stage 2 Completo] {timing_ms:.1f} ms")
-            print(f"  Obstáculos: {n_obs} | Voids: {n_void} | Ground: {n_ground} | Inciertos: {n_uncertain}")
-            print(f"  Fusión HCD: {hcd_status}")
-            if hcd is not None and self.config.enable_hcd:
-                n_hcd_changed = np.sum(obs_mask_final != obs_region)
-                print(f"  HCD cambió {n_hcd_changed} clasificaciones")
+            print(f"  Obstáculos: {obs_mask_final.sum()} | Voids: {void_mask_final.sum()} | Ground: {ground_mask_final.sum()}")
 
         return {
             'delta_r': delta_r,
@@ -980,13 +789,13 @@ class LidarPipelineSuite:
             'obs_mask': obs_mask_final,
             'void_mask': void_mask_final,
             'ground_mask': ground_mask_final,
-            'uncertain_mask': uncertain_mask,
+            'uncertain_mask': np.zeros(N, dtype=bool),
             'timing_ms': timing_ms
         }
 
     def stage2_complete(self, points: np.ndarray) -> Dict:
         """
-        Stage 2 completo: ejecuta Stage 1 + delta-r con fusión HCD.
+        Stage 2 completo: ejecuta Stage 1 + delta-r.
 
         Orquesta la ejecución secuencial de Stage 1 (segmentación) y
         Stage 2 (detección de anomalías), reutilizando las normales y
@@ -998,21 +807,20 @@ class LidarPipelineSuite:
         Returns:
             Dict con resultados combinados de Stage 1 + Stage 2
         """
-        # Stage 1: Segmentación de suelo + HCD
+        # Stage 1: Segmentación de suelo + rechazo de paredes
         stage1_result = self.stage1_complete(points)
 
-        # Stage 2: delta-r con fusión HCD
+        # Stage 2: delta-r
         stage2_result = self.compute_delta_r(
             points=points,
             ground_indices=stage1_result['ground_indices'],
             n_per_point=stage1_result['n_per_point'],
             d_per_point=stage1_result['d_per_point'],
-            hcd=stage1_result['hcd'] if self.config.enable_hcd else None
         )
 
         # Combinar resultados
         return {
-            **stage1_result,  # ground_indices, rejected_walls, hcd, timing_ms (Stage 1)
+            **stage1_result,  # ground_indices, rejected_walls, timing_ms (Stage 1)
             **stage2_result,  # delta_r, likelihood, obs_mask, void_mask, timing_ms (Stage 2)
             'timing_total_ms': stage1_result['timing_ms'] + stage2_result['timing_ms']
         }
@@ -1076,45 +884,68 @@ class LidarPipelineSuite:
         obs_pts = points[obs_indices]  # (M, 3)
 
         # ========================================
-        # 2. CLUSTERING DBSCAN
+        # 2. VOXEL DOWNSAMPLING + DBSCAN
         # ========================================
         t_dbscan = time.time()
 
+        # Voxelizar puntos obstáculo para reducir N antes de DBSCAN
+        voxel_size = cfg.cluster_eps * 0.3  # Celdas más finas que eps para no perder resolución
+        vox_coords = np.floor(obs_pts / voxel_size).astype(np.int32)
+        # Hash único por voxel
+        vox_keys = (vox_coords[:, 0].astype(np.int64) * 1000003 +
+                    vox_coords[:, 1].astype(np.int64) * 1009 +
+                    vox_coords[:, 2].astype(np.int64))
+
+        # Agrupar puntos por voxel: calcular centroide de cada voxel
+        unique_keys, inverse, counts = np.unique(vox_keys, return_inverse=True, return_counts=True)
+        n_voxels = len(unique_keys)
+
+        # Centroides con bincount (evita add.at, ~3x más rápido)
+        voxel_centroids = np.column_stack([
+            np.bincount(inverse, weights=obs_pts[:, d], minlength=n_voxels)
+            for d in range(3)
+        ]) / counts[:, np.newaxis]
+        voxel_centroids = voxel_centroids.astype(np.float32)
+
+        # DBSCAN sobre centroides (mucho menos puntos)
         db = DBSCAN(
             eps=cfg.cluster_eps,
-            min_samples=cfg.cluster_min_samples,
-            n_jobs=-1  # Usar todos los cores
+            min_samples=max(2, cfg.cluster_min_samples // 2),
+            n_jobs=-1
         )
-        cluster_labels_obs = db.fit_predict(obs_pts)  # (M,) etiquetas: -1=ruido, 0,1,2...=cluster
+        voxel_labels = db.fit_predict(voxel_centroids)
+
+        # Propagar etiquetas de voxel a puntos originales
+        cluster_labels_obs = voxel_labels[inverse]
 
         t_dbscan_end = time.time()
 
         # ========================================
-        # 3. FILTRAR CLUSTERS PEQUEÑOS
+        # 3. FILTRAR CLUSTERS PEQUEÑOS (vectorizado con bincount)
         # ========================================
         t_filter = time.time()
 
-        # Contar puntos por cluster
-        unique_labels = np.unique(cluster_labels_obs)
-        valid_clusters = set()
+        # Contar puntos REALES por cluster usando bincount
+        max_label = cluster_labels_obs.max()
+        if max_label >= 0:
+            # bincount solo funciona con >= 0, separar ruido (-1)
+            cluster_sizes = np.bincount(cluster_labels_obs[cluster_labels_obs >= 0],
+                                         minlength=max_label + 1)
+            # Lookup vectorizado: cada punto → tamaño de su cluster
+            point_cluster_size = np.where(
+                cluster_labels_obs >= 0,
+                cluster_sizes[cluster_labels_obs.clip(0)],
+                0
+            )
+            valid_mask_obs = point_cluster_size >= cfg.cluster_min_pts
+        else:
+            valid_mask_obs = np.zeros(n_obs, dtype=bool)
 
-        for label in unique_labels:
-            if label == -1:  # Ruido
-                continue
-            cluster_size = (cluster_labels_obs == label).sum()
-            if cluster_size >= cfg.cluster_min_pts:
-                valid_clusters.add(label)
-
-        # Máscara: punto pertenece a cluster válido (grande)
-        valid_mask_obs = np.array([
-            cl in valid_clusters for cl in cluster_labels_obs
-        ], dtype=bool)
-
-        # Actualizar obs_mask: solo mantener puntos en clusters válidos
+        # Actualizar obs_mask
         obs_mask_new = np.zeros(N, dtype=bool)
         obs_mask_new[obs_indices[valid_mask_obs]] = True
 
-        # Propagar al array completo de etiquetas de cluster
+        # Propagar al array completo
         cluster_labels_full = np.full(N, -1, dtype=np.int32)
         cluster_labels_full[obs_indices] = cluster_labels_obs
 
@@ -1126,16 +957,20 @@ class LidarPipelineSuite:
         t_end = time.time()
         timing_ms = (t_end - t_start) * 1000.0
 
-        n_clusters_total = len(unique_labels[unique_labels >= 0])
-        n_clusters_valid = len(valid_clusters)
-        n_clusters_rejected = n_clusters_total - n_clusters_valid
-        n_noise = (cluster_labels_obs == -1).sum()
-        n_small_cluster = (~valid_mask_obs & (cluster_labels_obs >= 0)).sum()
+        n_noise = int((cluster_labels_obs == -1).sum())
+        n_small_cluster = int((~valid_mask_obs & (cluster_labels_obs >= 0)).sum())
         n_removed = int(obs_mask.sum() - obs_mask_new.sum())
+
+        if max_label >= 0:
+            n_clusters_total = int((cluster_sizes > 0).sum())
+            n_clusters_valid = int((cluster_sizes >= cfg.cluster_min_pts).sum())
+        else:
+            n_clusters_total = 0
+            n_clusters_valid = 0
 
         if cfg.verbose:
             print(f"[Stage 3 DBSCAN] {timing_ms:.1f} ms")
-            print(f"  Clusters: {n_clusters_total} total | {n_clusters_valid} válidos (>={cfg.cluster_min_pts} pts) | {n_clusters_rejected} rechazados")
+            print(f"  Clusters: {n_clusters_total} total | {n_clusters_valid} válidos (>={cfg.cluster_min_pts} pts) | {n_clusters_total - n_clusters_valid} rechazados")
             print(f"  Puntos eliminados: {n_removed} ({100*n_removed/max(n_obs,1):.1f}%) — ruido: {n_noise}, clusters pequeños: {n_small_cluster}")
             print(f"  Tiempos: DBSCAN={1000*(t_dbscan_end-t_dbscan):.0f}ms | filtro={1000*(t_filter_end-t_filter):.0f}ms")
 
@@ -1144,7 +979,7 @@ class LidarPipelineSuite:
             'obs_mask': obs_mask_new,
             'cluster_labels': cluster_labels_full,
             'n_clusters': n_clusters_valid,
-            'n_clusters_rejected': n_clusters_rejected,
+            'n_clusters_rejected': n_clusters_total - n_clusters_valid,
             'n_noise_removed': n_noise,
             'n_small_cluster_removed': n_small_cluster,
             'n_cluster_total_removed': n_removed,
