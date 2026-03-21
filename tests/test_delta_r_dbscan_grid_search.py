@@ -141,11 +141,14 @@ def metrics_from_accum(tp, fp, fn):
 # GRIDS DE PARÁMETROS
 # ========================================
 
-def get_delta_r_grid():
-    return {
+def get_delta_r_grid(conservative=False):
+    grid = {
         'threshold_obs':  [-0.3, -0.4, -0.5, -0.6, -0.7, -0.8],
         'threshold_void': [0.5, 0.6, 0.8, 1.0, 1.2, 1.5],
     }
+    if conservative:
+        grid['min_nz'] = [0.85, 0.90, 0.93, 0.95]
+    return grid
 
 
 def get_dbscan_grid():
@@ -190,10 +193,16 @@ def precompute_stage1_and_delta_r(seq, scan_ids):
         else:
             wall_indices = np.array([], dtype=np.int64)
 
+        # Para modo conservador: guardar nonground_indices y nz per point
+        nonground_indices = stage1_result['nonground_indices']
+        nz_per_point = np.abs(n_per_point[:, 2]).astype(np.float32)
+
         frames.append({
             'points': pts,
             'delta_r': delta_r,
             'rejected_wall_indices': wall_indices,
+            'nonground_indices': nonground_indices,
+            'nz_per_point': nz_per_point,
             'gt_mask': gt_mask,
             'valid_mask': valid_mask,
             'n_points': N,
@@ -232,7 +241,7 @@ def precompute_all_sequences(seqs, stride):
     t_total = time.time() - t0
     total_frames = len(all_frames)
     mem_mb = sum(
-        f['points'].nbytes + f['delta_r'].nbytes + f['gt_mask'].nbytes + f['valid_mask'].nbytes + f['rejected_wall_indices'].nbytes
+        f['points'].nbytes + f['delta_r'].nbytes + f['gt_mask'].nbytes + f['valid_mask'].nbytes + f['rejected_wall_indices'].nbytes + f['nonground_indices'].nbytes + f['nz_per_point'].nbytes
         for f in all_frames
     ) / 1e6
 
@@ -244,9 +253,35 @@ def precompute_all_sequences(seqs, stride):
 # REPLAY FUNCTIONS
 # ========================================
 
-def replay_delta_r_single(frame, threshold_obs, threshold_void):
-    """Reclasifica un frame con nuevos umbrales. Retorna obs_mask."""
-    obs_mask = (frame['delta_r'] < threshold_obs) | (frame['delta_r'] > threshold_void)
+def replay_delta_r_single(frame, threshold_obs, threshold_void, conservative=False, min_nz=0.95):
+    """Reclasifica un frame con nuevos umbrales. Retorna obs_mask.
+
+    Si conservative=True: preserva nonground de Stage 1, solo rescata ground→obs
+    en bins fiables (nz >= min_nz). Nunca degrada Stage 1.
+    """
+    if conservative:
+        N = frame['n_points']
+        nonground_indices = frame['nonground_indices']
+        nz_per_point = frame['nz_per_point']
+        delta_r = frame['delta_r']
+
+        # Empezar con Stage 1
+        obs_mask = np.zeros(N, dtype=bool)
+        obs_mask[nonground_indices] = True
+
+        # Bins fiables
+        reliable = nz_per_point >= min_nz
+
+        # Máscara ground de Stage 1
+        ground_s1 = ~obs_mask
+
+        # Rescate: solo ground + bin fiable + anomalía
+        rescatable = ground_s1 & reliable
+        rescued = rescatable & ((delta_r < threshold_obs) | (delta_r > threshold_void))
+        obs_mask |= rescued
+    else:
+        obs_mask = (frame['delta_r'] < threshold_obs) | (frame['delta_r'] > threshold_void)
+
     if len(frame['rejected_wall_indices']) > 0:
         obs_mask[frame['rejected_wall_indices']] = True
     return obs_mask
@@ -304,11 +339,15 @@ def replay_dbscan(points, obs_mask, eps, min_samples, min_pts):
 # ========================================
 
 _GLOBAL_FRAMES = None
+_GLOBAL_CONSERVATIVE = False
+_GLOBAL_MIN_NZ = 0.95
 
 
-def _init_worker(frames):
-    global _GLOBAL_FRAMES
+def _init_worker(frames, conservative=False, min_nz=0.95):
+    global _GLOBAL_FRAMES, _GLOBAL_CONSERVATIVE, _GLOBAL_MIN_NZ
     _GLOBAL_FRAMES = frames
+    _GLOBAL_CONSERVATIVE = conservative
+    _GLOBAL_MIN_NZ = min_nz
 
 
 # ========================================
@@ -317,17 +356,26 @@ def _init_worker(frames):
 
 def _eval_delta_r_combo(args):
     """Worker: evalúa un combo delta-r sobre todos los frames."""
-    threshold_obs, threshold_void = args
+    if _GLOBAL_CONSERVATIVE and len(args) == 3:
+        threshold_obs, threshold_void, min_nz = args
+    else:
+        threshold_obs, threshold_void = args
+        min_nz = _GLOBAL_MIN_NZ
     total_tp, total_fp, total_fn = 0, 0, 0
     for frame in _GLOBAL_FRAMES:
-        obs_mask = replay_delta_r_single(frame, threshold_obs, threshold_void)
+        obs_mask = replay_delta_r_single(frame, threshold_obs, threshold_void,
+                                         conservative=_GLOBAL_CONSERVATIVE,
+                                         min_nz=min_nz)
         tp, fp, fn = compute_metrics_accum(frame['gt_mask'], obs_mask, frame['valid_mask'])
         total_tp += tp
         total_fp += fp
         total_fn += fn
     m = metrics_from_accum(total_tp, total_fp, total_fn)
+    params = {'threshold_obs': threshold_obs, 'threshold_void': threshold_void}
+    if _GLOBAL_CONSERVATIVE:
+        params['min_nz'] = min_nz
     return {
-        'params': {'threshold_obs': threshold_obs, 'threshold_void': threshold_void},
+        'params': params,
         **m,
     }
 
@@ -337,7 +385,9 @@ def _eval_full_combo(args):
     threshold_obs, threshold_void, eps, min_samples, min_pts = args
     total_tp, total_fp, total_fn = 0, 0, 0
     for frame in _GLOBAL_FRAMES:
-        obs_mask = replay_delta_r_single(frame, threshold_obs, threshold_void)
+        obs_mask = replay_delta_r_single(frame, threshold_obs, threshold_void,
+                                         conservative=_GLOBAL_CONSERVATIVE,
+                                         min_nz=_GLOBAL_MIN_NZ)
         obs_filtered = replay_dbscan(frame['points'], obs_mask, eps, min_samples, min_pts)
         tp, fp, fn = compute_metrics_accum(frame['gt_mask'], obs_filtered, frame['valid_mask'])
         total_tp += tp
@@ -358,11 +408,14 @@ def _eval_full_combo(args):
 # ========================================
 
 def search_delta_r_parallel(frames, grid, n_workers):
-    combos = list(product(grid['threshold_obs'], grid['threshold_void']))
+    if 'min_nz' in grid:
+        combos = list(product(grid['threshold_obs'], grid['threshold_void'], grid['min_nz']))
+    else:
+        combos = list(product(grid['threshold_obs'], grid['threshold_void']))
     print(f"  [Delta-r] {len(combos)} combos × {len(frames)} frames, {n_workers} workers")
 
     t0 = time.time()
-    with Pool(n_workers, initializer=_init_worker, initargs=(frames,)) as pool:
+    with Pool(n_workers, initializer=_init_worker, initargs=(frames, _GLOBAL_CONSERVATIVE, _GLOBAL_MIN_NZ)) as pool:
         results = pool.map(_eval_delta_r_combo, combos,
                            chunksize=max(1, len(combos) // n_workers))
 
@@ -387,7 +440,7 @@ def search_dbscan_parallel(frames, delta_r_params, dbscan_grid, n_workers):
     print(f"  [DBSCAN] {len(combos)} combos × {len(frames)} frames, {n_workers} workers")
 
     t0 = time.time()
-    with Pool(n_workers, initializer=_init_worker, initargs=(frames,)) as pool:
+    with Pool(n_workers, initializer=_init_worker, initargs=(frames, _GLOBAL_CONSERVATIVE, _GLOBAL_MIN_NZ)) as pool:
         results = list(pool.imap_unordered(
             _eval_full_combo, combos,
             chunksize=max(1, len(combos) // (n_workers * 4))
@@ -416,7 +469,7 @@ def search_full_parallel(frames, delta_r_grid, dbscan_grid, n_workers):
     t0 = time.time()
     done = [0]
 
-    with Pool(n_workers, initializer=_init_worker, initargs=(frames,)) as pool:
+    with Pool(n_workers, initializer=_init_worker, initargs=(frames, _GLOBAL_CONSERVATIVE, _GLOBAL_MIN_NZ)) as pool:
         results = []
         chunksize = max(1, n_combos // (n_workers * 4))
         for r in pool.imap_unordered(_eval_full_combo, combos, chunksize=chunksize):
@@ -447,7 +500,7 @@ def evaluate_on_val(val_frames, params_list, mode, n_workers):
 
     if mode == 'delta_r':
         combos = [(p['threshold_obs'], p['threshold_void']) for p in params_list]
-        with Pool(n_workers, initializer=_init_worker, initargs=(val_frames,)) as pool:
+        with Pool(n_workers, initializer=_init_worker, initargs=(val_frames, _GLOBAL_CONSERVATIVE, _GLOBAL_MIN_NZ)) as pool:
             val_results = pool.map(_eval_delta_r_combo, combos,
                                    chunksize=max(1, len(combos) // max(1, n_workers)))
     else:
@@ -456,7 +509,7 @@ def evaluate_on_val(val_frames, params_list, mode, n_workers):
              p['cluster_eps'], p['cluster_min_samples'], p['cluster_min_pts'])
             for p in params_list
         ]
-        with Pool(n_workers, initializer=_init_worker, initargs=(val_frames,)) as pool:
+        with Pool(n_workers, initializer=_init_worker, initargs=(val_frames, _GLOBAL_CONSERVATIVE, _GLOBAL_MIN_NZ)) as pool:
             val_results = pool.map(_eval_full_combo, combos,
                                    chunksize=max(1, len(combos) // max(1, n_workers)))
 
@@ -475,7 +528,9 @@ def compute_baselines(frames, current_thr_obs, current_thr_void,
     bl_tp, bl_fp, bl_fn = 0, 0, 0
     obs_masks = []
     for f in frames:
-        obs_mask = replay_delta_r_single(f, current_thr_obs, current_thr_void)
+        obs_mask = replay_delta_r_single(f, current_thr_obs, current_thr_void,
+                                         conservative=_GLOBAL_CONSERVATIVE,
+                                         min_nz=_GLOBAL_MIN_NZ)
         obs_masks.append(obs_mask)
         tp, fp, fn = compute_metrics_accum(f['gt_mask'], obs_mask, f['valid_mask'])
         bl_tp += tp
@@ -516,15 +571,18 @@ def print_results(results, baseline_f1, baseline_iou, top_n, title, mode):
     print(f"Baseline: F1={100*baseline_f1:.2f}%  IoU={100*baseline_iou:.2f}%")
     print(f"{'='*120}")
 
+    has_min_nz = results and 'min_nz' in results[0].get('params', {})
     if mode == 'delta_r':
-        print(f"{'#':>4} {'thr_obs':>8} {'thr_void':>9} | {'F1':>8} {'IoU':>8} "
+        nz_hdr = f" {'min_nz':>7}" if has_min_nz else ""
+        print(f"{'#':>4} {'thr_obs':>8} {'thr_void':>9}{nz_hdr} | {'F1':>8} {'IoU':>8} "
               f"{'dF1':>8} {'P':>8} {'R':>8} {'FP':>10} {'FN':>10}")
-        print("-" * 100)
+        print("-" * (108 if has_min_nz else 100))
         for i, r in enumerate(results[:top_n]):
             p = r['params']
             df1 = r['f1'] - baseline_f1
             marker = " *" if df1 > 0.0001 else ""
-            print(f"{i+1:>4} {p['threshold_obs']:>8.2f} {p['threshold_void']:>9.2f}"
+            nz_col = f" {p['min_nz']:>7.2f}" if has_min_nz else ""
+            print(f"{i+1:>4} {p['threshold_obs']:>8.2f} {p['threshold_void']:>9.2f}{nz_col}"
                   f" | {100*r['f1']:>7.2f}% {100*r['iou']:>7.2f}% {100*df1:>+7.2f}%"
                   f" {100*r['precision']:>7.2f}% {100*r['recall']:>7.2f}%"
                   f" {r['fp']:>10} {r['fn']:>10}{marker}")
@@ -566,11 +624,13 @@ def print_train_val_comparison(train_results, val_results, baseline_train_f1,
     # Indexar val por params
     val_by_params = {str(r['params']): r for r in val_results}
 
+    has_min_nz = train_results and 'min_nz' in train_results[0].get('params', {})
     if mode == 'delta_r':
-        print(f"{'#':>4} {'thr_obs':>8} {'thr_void':>9}"
+        nz_hdr = f" {'min_nz':>7}" if has_min_nz else ""
+        print(f"{'#':>4} {'thr_obs':>8} {'thr_void':>9}{nz_hdr}"
               f" | {'Train F1':>9} {'Val F1':>9} {'Gap':>7}"
               f" | {'Train IoU':>10} {'Val IoU':>10}")
-        print("-" * 95)
+        print("-" * (103 if has_min_nz else 95))
     else:
         print(f"{'#':>4} {'thr_obs':>8} {'thr_void':>9} {'eps':>6} {'ms':>4} {'mp':>4}"
               f" | {'Train F1':>9} {'Val F1':>9} {'Gap':>7}"
@@ -591,7 +651,8 @@ def print_train_val_comparison(train_results, val_results, baseline_train_f1,
         marker = " !" if vr and gap > 0.01 else ""
 
         if mode == 'delta_r':
-            print(f"{i+1:>4} {p['threshold_obs']:>8.2f} {p['threshold_void']:>9.2f}"
+            nz_col = f" {p['min_nz']:>7.2f}" if 'min_nz' in p else ""
+            print(f"{i+1:>4} {p['threshold_obs']:>8.2f} {p['threshold_void']:>9.2f}{nz_col}"
                   f" | {100*tr['f1']:>8.2f}% {val_f1_str} {gap_str}"
                   f" | {100*tr['iou']:>9.2f}% {val_iou_str}{marker}")
         else:
@@ -641,9 +702,18 @@ def main():
                         help='threshold_obs fijo para modo dbscan (default: -0.5)')
     parser.add_argument('--threshold_void', type=float, default=0.8,
                         help='threshold_void fijo para modo dbscan (default: 0.8)')
+    parser.add_argument('--conservative', action='store_true',
+                        help='Modo conservador: solo rescate, nunca degradar Stage 1')
+    parser.add_argument('--min_nz', type=float, default=0.95,
+                        help='nz mínimo para bin fiable en modo conservador (default: 0.95)')
     args = parser.parse_args()
 
     n_workers = args.workers if args.workers > 0 else cpu_count()
+
+    # Setear globales para modo conservador
+    global _GLOBAL_CONSERVATIVE, _GLOBAL_MIN_NZ
+    _GLOBAL_CONSERVATIVE = args.conservative
+    _GLOBAL_MIN_NZ = args.min_nz
 
     # Descubrir secuencias disponibles
     available = discover_sequences()
@@ -666,7 +736,7 @@ def main():
         print("ERROR: No hay secuencias de train disponibles")
         return
 
-    delta_r_grid = get_delta_r_grid()
+    delta_r_grid = get_delta_r_grid(conservative=args.conservative)
     dbscan_grid = get_dbscan_grid()
 
     n_dr = 1
@@ -685,6 +755,7 @@ def main():
     print(f"Val:   {val_seqs if val_seqs else 'NINGUNA (sin evaluación de generalización)'}")
     print(f"Stride: {args.stride}")
     print(f"Workers: {n_workers}")
+    print(f"Conservador: {args.conservative}" + (f" (min_nz={args.min_nz})" if args.conservative else ""))
     print(f"Modo: {args.mode}")
     if args.mode in ('delta_r', 'full'):
         print(f"Delta-r: {n_dr} combos — {delta_r_grid}")

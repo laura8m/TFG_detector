@@ -72,6 +72,8 @@ class PipelineConfig:
 
     threshold_obs: float = -0.5  # Obstáculo positivo (m) — optimizado grid search (labels corregidas)
     threshold_void: float = 1.5  # Void/depresión (m) — optimizado grid search (labels corregidas)
+    delta_r_conservative: bool = True  # Modo conservador: solo rescate, nunca degradar Stage 1
+    delta_r_min_nz: float = 0.95  # nz mínimo para considerar bin fiable
 
     # ========================================
     # STAGE 3: Filtrado por clustering DBSCAN
@@ -705,6 +707,7 @@ class LidarPipelineSuite:
         ground_indices: np.ndarray,
         n_per_point: np.ndarray,
         d_per_point: np.ndarray,
+        nonground_indices: np.ndarray = None,
     ) -> Dict:
         """
         Stage 2: Detección de anomalías delta-r.
@@ -721,11 +724,17 @@ class LidarPipelineSuite:
             delta_r > umbral_void → Void/depresión (más lejos que el plano)
             Intermedio → Ground normal
 
+        Modo conservador (delta_r_conservative=True):
+            - Solo aplica delta-r en bins con nz >= delta_r_min_nz (plano fiable)
+            - Nunca reclasifica non-ground de Stage 1 como ground
+            - Solo permite ground→obstáculo o ground→void (rescate)
+
         Args:
             points: (N, 3) todos los puntos
             ground_indices: (M,) índices de puntos ground
             n_per_point: (N, 3) normales por punto
             d_per_point: (N,) offsets del plano por punto
+            nonground_indices: (K,) índices nonground de Stage 1 (para modo conservador)
 
         Returns:
             Dict con:
@@ -758,13 +767,43 @@ class LidarPipelineSuite:
         delta_r = np.clip(r_measured + d_per_point / safe_dot, -20.0, 10.0)
 
         # ========================================
-        # 3. CLASIFICACIÓN DIRECTA
+        # 3. CLASIFICACIÓN
         # ========================================
         threshold_obs = self.config.threshold_obs
         threshold_void = self.config.threshold_void
 
-        obs_mask_final = (delta_r < threshold_obs) | (delta_r > threshold_void)
-        void_mask_final = delta_r > threshold_void
+        if self.config.delta_r_conservative and nonground_indices is not None:
+            # --- MODO CONSERVADOR ---
+            # Empezar con la clasificación de Stage 1 (non-ground = obstáculo)
+            obs_mask_final = np.zeros(N, dtype=bool)
+            obs_mask_final[nonground_indices] = True  # Preservar Stage 1
+
+            # Máscara de bins fiables: nz >= delta_r_min_nz
+            nz_per_point = np.abs(n_per_point[:, 2])
+            reliable_bin = nz_per_point >= self.config.delta_r_min_nz
+
+            # Solo en puntos ground + bin fiable: rescatar como obstáculo o void
+            ground_mask_s1 = np.ones(N, dtype=bool)
+            ground_mask_s1[nonground_indices] = False
+            rescatable = ground_mask_s1 & reliable_bin
+
+            # Rescate: ground→obstáculo si delta-r indica anomalía
+            rescued_obs = rescatable & (delta_r < threshold_obs)
+            rescued_void = rescatable & (delta_r > threshold_void)
+            obs_mask_final |= rescued_obs | rescued_void
+
+            void_mask_final = np.zeros(N, dtype=bool)
+            void_mask_final[nonground_indices[delta_r[nonground_indices] > threshold_void]] = True
+            void_mask_final |= rescued_void
+
+            n_rescued = int(rescued_obs.sum() + rescued_void.sum())
+            if self.config.verbose:
+                n_reliable = int(reliable_bin.sum())
+                print(f"  [Delta-r conservador] Bins fiables: {n_reliable}/{N} pts | Rescatados: {n_rescued}")
+        else:
+            # --- MODO ORIGINAL ---
+            obs_mask_final = (delta_r < threshold_obs) | (delta_r > threshold_void)
+            void_mask_final = delta_r > threshold_void
 
         # Forzar paredes rechazadas como obstáculos
         if hasattr(self, 'rejected_wall_indices') and len(self.rejected_wall_indices) > 0:
@@ -817,6 +856,7 @@ class LidarPipelineSuite:
             ground_indices=stage1_result['ground_indices'],
             n_per_point=stage1_result['n_per_point'],
             d_per_point=stage1_result['d_per_point'],
+            nonground_indices=stage1_result['nonground_indices'],
         )
 
         # Combinar resultados
