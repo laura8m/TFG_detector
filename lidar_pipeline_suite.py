@@ -70,17 +70,17 @@ class PipelineConfig:
     # STAGE 2: Detección de anomalías delta-r
     # ========================================
 
-    threshold_obs: float = -0.4  # Obstáculo positivo (m) — optimizado grid search
-    threshold_void: float = 1.2  # Void/depresión (m) — optimizado grid search
+    threshold_obs: float = -0.5  # Obstáculo positivo (m) — optimizado grid search (labels corregidas)
+    threshold_void: float = 1.5  # Void/depresión (m) — optimizado grid search (labels corregidas)
 
     # ========================================
     # STAGE 3: Filtrado por clustering DBSCAN
     # ========================================
 
     enable_cluster_filtering: bool = True  # Activar/desactivar Stage 3
-    cluster_eps: float = 0.8  # DBSCAN epsilon (m) — optimizado grid search
-    cluster_min_samples: int = 12  # DBSCAN min_samples — optimizado grid search
-    cluster_min_pts: int = 30  # Puntos mínimos por cluster — optimizado grid search
+    cluster_eps: float = 1.2  # DBSCAN epsilon (m) — optimizado grid search (labels corregidas)
+    cluster_min_samples: int = 12  # DBSCAN min_samples — optimizado grid search (labels corregidas)
+    cluster_min_pts: int = 10  # Puntos mínimos por cluster — optimizado grid search (labels corregidas)
 
     # ========================================
     # GENERAL
