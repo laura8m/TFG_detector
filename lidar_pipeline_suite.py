@@ -70,10 +70,10 @@ class PipelineConfig:
     # STAGE 2: Detección de anomalías delta-r
     # ========================================
 
-    threshold_obs: float = -0.5  # Obstáculo positivo (m) — optimizado grid search (labels corregidas)
-    threshold_void: float = 1.5  # Void/depresión (m) — optimizado grid search (labels corregidas)
+    threshold_obs: float = -0.8  # Obstáculo positivo (m) — optimizado grid search conservador
+    threshold_void: float = 1.5  # Void/depresión (m) — optimizado grid search conservador
     delta_r_conservative: bool = True  # Modo conservador: solo rescate, nunca degradar Stage 1
-    delta_r_min_nz: float = 0.95  # nz mínimo para considerar bin fiable
+    delta_r_min_nz: float = 0.95  # nz mínimo para considerar bin fiable — optimizado grid search
 
     # ========================================
     # STAGE 3: Filtrado por clustering DBSCAN
@@ -1039,6 +1039,7 @@ class LidarPipelineSuite:
             Dict con resultados de Stages 1-3
         """
         stage2_result = self.stage2_complete(points)
+        self.last_stage2_result = stage2_result
         return self.stage3_cluster_filtering(points, stage2_result)
 
     # ========================================

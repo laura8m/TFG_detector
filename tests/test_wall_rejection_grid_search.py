@@ -242,6 +242,8 @@ def _eval_wall_combo(args):
         wall_kdtree_radius=kd_radius,
         threshold_obs=fp['threshold_obs'],
         threshold_void=fp['threshold_void'],
+        delta_r_conservative=fp.get('delta_r_conservative', False),
+        delta_r_min_nz=fp.get('delta_r_min_nz', 0.95),
         enable_cluster_filtering=False,
         verbose=False,
     )
@@ -286,6 +288,8 @@ def _eval_no_wall_baseline(dummy):
         enable_hybrid_wall_rejection=False,
         threshold_obs=fp['threshold_obs'],
         threshold_void=fp['threshold_void'],
+        delta_r_conservative=fp.get('delta_r_conservative', False),
+        delta_r_min_nz=fp.get('delta_r_min_nz', 0.95),
         enable_cluster_filtering=False,
         verbose=False,
     )
@@ -405,8 +409,12 @@ def main():
     parser.add_argument('--val_seq', type=str, nargs='*', default=None)
     parser.add_argument('--stride', type=int, default=1)
 
-    parser.add_argument('--threshold_obs', type=float, default=-0.5)
-    parser.add_argument('--threshold_void', type=float, default=0.8)
+    parser.add_argument('--threshold_obs', type=float, default=-0.8)
+    parser.add_argument('--threshold_void', type=float, default=1.5)
+    parser.add_argument('--conservative', action='store_true',
+                        help='Modo delta-r conservador')
+    parser.add_argument('--min_nz', type=float, default=0.95,
+                        help='nz mínimo para bin fiable en modo conservador')
     parser.add_argument('--no_dbscan', action='store_true')
     parser.add_argument('--cluster_eps', type=float, default=0.8)
     parser.add_argument('--cluster_min_samples', type=int, default=8)
@@ -435,6 +443,8 @@ def main():
     fixed_params = {
         'threshold_obs': args.threshold_obs,
         'threshold_void': args.threshold_void,
+        'delta_r_conservative': args.conservative,
+        'delta_r_min_nz': args.min_nz,
         'use_dbscan': not args.no_dbscan,
         'cluster_eps': args.cluster_eps,
         'cluster_min_samples': args.cluster_min_samples,
@@ -455,6 +465,7 @@ def main():
     print(f"Stride: {args.stride} | Workers: {n_workers} | Combos: {n_combos}")
     print(f"\nGrid: {grid}")
     print(f"\nStage 2-3 fijos: thr_obs={args.threshold_obs}, thr_void={args.threshold_void}")
+    print(f"Delta-r conservador: {args.conservative}" + (f" (min_nz={args.min_nz})" if args.conservative else ""))
     if not args.no_dbscan:
         print(f"  DBSCAN: eps={args.cluster_eps}, ms={args.cluster_min_samples}, mp={args.cluster_min_pts}")
     else:

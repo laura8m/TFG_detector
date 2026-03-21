@@ -146,10 +146,11 @@ def main():
             total_frames += len(ids)
     print(f"\nVal: {list(all_scan_ids.keys())} | {total_frames} frames | stride={args.stride}")
 
-    # Configuraciones a evaluar
+    # Configuraciones a evaluar (params optimizados con labels corregidas)
     configs = {
         'PW++ vanilla': PipelineConfig(
             enable_hybrid_wall_rejection=False,
+            delta_r_conservative=False,
             verbose=False,
         ),
         'PW++ + Wall Rejection': PipelineConfig(
@@ -157,22 +158,18 @@ def main():
             wall_rejection_slope=0.9,
             wall_height_diff_threshold=0.2,
             wall_kdtree_radius=0.3,
+            delta_r_conservative=False,
             verbose=False,
         ),
-        'PW++ + WR + delta-r': PipelineConfig(
+        'PW++ + WR + delta-r conservador': PipelineConfig(
             enable_hybrid_wall_rejection=True,
             wall_rejection_slope=0.9,
             wall_height_diff_threshold=0.2,
             wall_kdtree_radius=0.3,
-            threshold_obs=-0.4,
-            threshold_void=1.2,
-            verbose=False,
-        ),
-        'PW++ + WR + DBSCAN': PipelineConfig(
-            enable_hybrid_wall_rejection=True,
-            wall_rejection_slope=0.9,
-            wall_height_diff_threshold=0.2,
-            wall_kdtree_radius=0.3,
+            threshold_obs=-0.8,
+            threshold_void=1.5,
+            delta_r_conservative=True,
+            delta_r_min_nz=0.95,
             verbose=False,
         ),
         'PW++ + WR + delta-r + DBSCAN': PipelineConfig(
@@ -180,11 +177,13 @@ def main():
             wall_rejection_slope=0.9,
             wall_height_diff_threshold=0.2,
             wall_kdtree_radius=0.3,
-            threshold_obs=-0.4,
-            threshold_void=1.2,
-            cluster_eps=0.8,
+            threshold_obs=-0.8,
+            threshold_void=1.5,
+            delta_r_conservative=True,
+            delta_r_min_nz=0.95,
+            cluster_eps=1.2,
             cluster_min_samples=12,
-            cluster_min_pts=30,
+            cluster_min_pts=10,
             enable_cluster_filtering=True,
             verbose=False,
         ),
@@ -192,9 +191,9 @@ def main():
 
     # DBSCAN params para configs sin DBSCAN integrado
     dbscan_params = {
-        'eps': 0.8,
+        'eps': 1.2,
         'min_samples': 12,
-        'min_pts': 30,
+        'min_pts': 10,
     }
 
     # Cargar todos los frames
@@ -237,20 +236,8 @@ def main():
                 pred_mask = np.zeros(len(pts), dtype=bool)
                 pred_mask[s1['nonground_indices']] = True
 
-            elif config_name == 'PW++ + WR + DBSCAN':
-                # PW++ + WR + DBSCAN (sin delta-r)
-                s1 = pipeline.stage1_complete(pts)
-                obs_mask = np.zeros(len(pts), dtype=bool)
-                obs_mask[s1['nonground_indices']] = True
-                pred_mask = replay_dbscan(
-                    pts, obs_mask,
-                    dbscan_params['eps'],
-                    dbscan_params['min_samples'],
-                    dbscan_params['min_pts'],
-                )
-
-            elif config_name == 'PW++ + WR + delta-r':
-                # Pipeline Stage 1+2 (sin DBSCAN)
+            elif config_name == 'PW++ + WR + delta-r conservador':
+                # Pipeline Stage 1+2 conservador (sin DBSCAN)
                 result = pipeline.stage2_complete(pts)
                 pred_mask = result['obs_mask']
 
