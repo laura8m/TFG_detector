@@ -792,9 +792,7 @@ class LidarPipelineSuite:
             rescued_void = rescatable & (delta_r > threshold_void)
             obs_mask_final |= rescued_obs | rescued_void
 
-            void_mask_final = np.zeros(N, dtype=bool)
-            void_mask_final[nonground_indices[delta_r[nonground_indices] > threshold_void]] = True
-            void_mask_final |= rescued_void
+            void_mask_final = rescued_void.copy()
 
             n_rescued = int(rescued_obs.sum() + rescued_void.sum())
             if self.config.verbose:

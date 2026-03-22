@@ -97,6 +97,13 @@ def test_sequence(seq, stride=10, max_frames=50):
             delta_r_min_nz=0.95,
             verbose=False
         ),
+        'Stage 1 + delta-r cons. sin voids': PipelineConfig(
+            enable_hybrid_wall_rejection=True,
+            delta_r_conservative=True,
+            delta_r_min_nz=0.95,
+            delta_r_rescue_voids=False,
+            verbose=False
+        ),
     }
 
     results = {}
