@@ -29,7 +29,7 @@ import time
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lidar_pipeline_suite import LidarPipelineSuite, PipelineConfig
-from data_paths import get_scan_file, get_label_file
+from data_paths import get_scan_file, get_label_file, get_sequence_info
 
 # ========================================
 # DATOS
@@ -123,9 +123,20 @@ CONFIGS = {
 # TEST
 # ========================================
 
-def test_sequence(seq, n_frames, scan_start):
+def test_sequence(seq, n_frames, scan_start, stride=1):
+    info = get_sequence_info(seq)
+    velodyne_dir = info['data_dir'] / 'velodyne'
+    scan_files = sorted(velodyne_dir.glob('*.bin'))
+    all_scan_ids = [int(f.stem) for f in scan_files]
+
+    # Aplicar scan_start, stride y n_frames
+    all_scan_ids = [s for s in all_scan_ids if s >= scan_start]
+    all_scan_ids = all_scan_ids[::stride]
+    if n_frames > 0:
+        all_scan_ids = all_scan_ids[:n_frames]
+
     print("\n" + "=" * 100)
-    print(f"SECUENCIA {seq} | Frames {scan_start}-{scan_start + n_frames - 1}")
+    print(f"SECUENCIA {seq} | {len(all_scan_ids)} frames (stride={stride})")
     print("=" * 100)
 
     # Acumuladores por configuración
@@ -139,14 +150,14 @@ def test_sequence(seq, n_frames, scan_start):
     timing_s1 = {name: [] for name in CONFIGS}
     timing_s2 = {name: [] for name in CONFIGS}
 
-    for i in range(n_frames):
-        scan_id = scan_start + i
+    for i, scan_id in enumerate(all_scan_ids):
         pts, labels = load_kitti_scan(scan_id, seq)
         gt_ground = get_gt_ground_mask(labels)
         gt_obs = get_gt_obstacle_mask(labels)
         valid_mask = get_valid_mask(labels)
 
-        print(f"\n  Frame {scan_id}: {len(pts)} pts | GT ground={gt_ground.sum()} obs={gt_obs.sum()}")
+        if (i + 1) % 50 == 0 or i == 0:
+            print(f"  Frame {i+1}/{len(all_scan_ids)} (scan {scan_id})")
 
         for name, config in CONFIGS.items():
             pipeline = LidarPipelineSuite(config)
@@ -194,7 +205,7 @@ def test_sequence(seq, n_frames, scan_start):
     # RESUMEN
     # ========================================
     print(f"\n{'='*100}")
-    print(f"RESUMEN SECUENCIA {seq} ({n_frames} frames)")
+    print(f"RESUMEN SECUENCIA {seq} ({len(all_scan_ids)} frames, stride={stride})")
     print(f"{'='*100}")
 
     # --- Ground Segmentation ---
@@ -245,16 +256,17 @@ def test_sequence(seq, n_frames, scan_start):
 
 def main():
     parser = argparse.ArgumentParser(description='Stage 1 ablation: Patchwork++ vanilla vs completo')
-    parser.add_argument('--seq', type=str, default='both', choices=['00', '04', 'both'])
-    parser.add_argument('--n_frames', type=int, default=10)
+    parser.add_argument('--seq', type=str, default='both', choices=['00', '04', '08', 'both'])
+    parser.add_argument('--n_frames', type=int, default=0, help='Numero de frames (0=todos)')
     parser.add_argument('--scan_start', type=int, default=0)
+    parser.add_argument('--stride', type=int, default=1)
     args = parser.parse_args()
 
     seqs = ['04', '00'] if args.seq == 'both' else [args.seq]
     all_results = {}
 
     for seq in seqs:
-        all_results[seq] = test_sequence(seq, args.n_frames, args.scan_start)
+        all_results[seq] = test_sequence(seq, args.n_frames, args.scan_start, args.stride)
 
     # Resumen global si hay ambas secuencias
     if len(seqs) > 1:
