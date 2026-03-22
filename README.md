@@ -69,43 +69,44 @@ Rescata puntos ground que son obstaculos reales, solo en bins con plano fiable (
 
 **Wall Rejection: +2.06% F1, +3.68% IoU, +7.40% Recall sobre PW++ vanilla.**
 
-### Analisis por clase (Recall, seq 00, 454 frames)
+### Analisis por clase (Recall, val seq 08, stride=5)
 
 | Clase | N puntos | PW++ vanilla | PW++ + WR | Delta |
 |-------|----------|-------------|-----------|-------|
-| building | 10,795,752 | 72.85% | 89.82% | **+16.97%** |
-| fence | 2,161,746 | 78.75% | 91.02% | **+12.27%** |
-| vegetation | 6,660,555 | 90.54% | 94.38% | +3.84% |
-| trunk | 1,018,547 | 89.91% | 93.02% | +3.11% |
-| pole | 326,483 | 85.87% | 89.45% | +3.58% |
-| person | 119,283 | 85.86% | 89.22% | +3.36% |
-| car | 4,998,870 | 94.98% | 96.41% | +1.43% |
+| fence | 2,525,721 | 81.48% | 96.38% | **+14.90%** |
+| vegetation | 29,200,604 | 85.77% | 94.73% | **+8.96%** |
+| building | 11,373,274 | 90.43% | 97.49% | **+7.06%** |
+| car | 6,189,620 | 91.80% | 96.26% | +4.46% |
+| trunk | 1,101,779 | 92.72% | 95.84% | +3.11% |
+| person | 95,976 | 92.66% | 95.42% | +2.76% |
+| pole | 333,913 | 93.68% | 96.27% | +2.58% |
 
-WR mejora mas en **buildings (+17%) y fences (+12%)**: las estructuras verticales que PW++ confunde con suelo.
+WR mejora mas en **fences (+14.9%), vegetacion (+9.0%) y buildings (+7.1%)**: las estructuras que PW++ confunde con suelo por tener bases amplias.
 
-### Analisis por distancia (F1, seq 00, 454 frames)
+### Analisis por distancia (F1, val seq 08, stride=5)
 
 | Rango | PW++ vanilla | PW++ + WR | Delta |
 |-------|-------------|-----------|-------|
-| 0-10m | 96.09% | 97.03% | +0.94% |
-| 10-20m | 93.43% | 96.30% | +2.87% |
-| 20-30m | 89.44% | 94.69% | +5.25% |
-| 30-40m | 83.34% | 91.24% | +7.90% |
-| 40-60m | 74.17% | 84.31% | **+10.14%** |
-| 60-80m | 59.21% | 66.88% | +7.67% |
+| 0-10m | 92.64% | 95.09% | **+2.45%** |
+| 10-20m | 93.21% | 95.83% | **+2.62%** |
+| 20-30m | 92.39% | 94.78% | +2.38% |
+| 30-40m | 92.87% | 94.22% | +1.35% |
+| 40-60m | 94.65% | 95.17% | +0.52% |
+| 60-80m | 91.36% | 91.59% | +0.23% |
 
-WR mejora mas **a distancia** (40-60m: +10.14%). A distancia, PW++ ajusta peores planos (menos puntos) y clasifica mas paredes como suelo. WR corrige eso.
+WR mejora de forma consistente en todos los rangos, con mayor impacto en **distancias cortas y medias** (0-20m: +2.5%). A corta distancia hay mas puntos en paredes/vallas que PW++ clasifica mal.
 
-### Stage 1 detallado (PW++ vanilla vs PW++ + WR)
+### Stage 1 detallado (val seq 08, 815 frames, stride=5)
 
 | Metrica | PW++ vanilla | PW++ + WR | Delta |
 |---------|-------------|-----------|-------|
-| Ground F1 | 94.1% | 96.1% | +2.0% |
-| Obstacle Leak | 13.2% | 5.8% | **-7.4%** |
-| Obstacle F1 | 92.4% | 94.5% | +2.1% |
-| Stage 1 ms | 37.4ms | 52.2ms | +14.8ms |
+| Ground F1 | 92.5% | 94.4% | +1.9% |
+| Obstacle Leak | 12.3% | 4.3% | **-8.0%** |
+| Obstacle F1 | 92.9% | 95.3% | +2.4% |
+| Obstacle IoU | 86.7% | 91.0% | +4.3% |
+| Stage 1 ms | 33.0ms | 42.5ms | +9.5ms |
 
-WR reduce el obstacle leak a menos de la mitad: 13.2% → 5.8%.
+WR reduce el obstacle leak a un tercio: 12.3% → 4.3% (de 6.4M a 2.2M puntos obstaculo mal clasificados como ground).
 
 ### Parametros optimos (grid search)
 

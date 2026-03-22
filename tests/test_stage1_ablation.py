@@ -1,23 +1,15 @@
 #!/usr/bin/env python3
 """
-Test: Ablation de Stage 1 — Patchwork++ vanilla vs Stage 1 completo.
-
-Compara 3 configuraciones de segmentación de suelo:
-1. Patchwork++ vanilla (sin wall rejection, sin HCD)
-2. Patchwork++ + Wall Rejection (sin HCD)
-3. Stage 1 completo (Patchwork++ + Wall Rejection + HCD)
+Test: Ablation de Stage 1 — Patchwork++ vanilla vs PW++ + Wall Rejection.
 
 Métricas de ground segmentation:
-- Ground Precision: de los puntos clasificados como ground, cuántos son ground real
-- Ground Recall: de los puntos ground reales, cuántos se detectan
-- Obstacle Leak: puntos obstáculo clasificados como ground (FP de ground = peligroso)
+- Ground Precision, Recall, F1
+- Obstacle Leak: puntos obstáculo clasificados como ground (peligroso)
 
-Métricas de detección de obstáculos (después de Stage 2):
+Métricas de detección de obstáculos (non-ground = obstáculo):
 - Obstacle Precision, Recall, F1, IoU
 
-Timing desglosado por sub-etapa.
-
-Evaluado en N frames de seq 00 (urbano) y seq 04 (highway).
+Timing por frame.
 """
 
 import sys
@@ -140,15 +132,10 @@ def test_sequence(seq, n_frames, scan_start, stride=1):
     print("=" * 100)
 
     # Acumuladores por configuración
-    # Ground segmentation metrics
     gnd_accum = {name: {'tp': 0, 'fp': 0, 'fn': 0} for name in CONFIGS}
-    # Obstacle leak: obstáculos GT clasificados como ground
     obs_leak_accum = {name: {'leaked': 0, 'total_obs': 0} for name in CONFIGS}
-    # Obstacle detection metrics (después de Stage 2)
     obs_accum = {name: {'tp': 0, 'fp': 0, 'fn': 0} for name in CONFIGS}
-    # Timing
     timing_s1 = {name: [] for name in CONFIGS}
-    timing_s2 = {name: [] for name in CONFIGS}
 
     for i, scan_id in enumerate(all_scan_ids):
         pts, labels = load_kitti_scan(scan_id, seq)
@@ -183,23 +170,18 @@ def test_sequence(seq, n_frames, scan_start, stride=1):
             obs_leak_accum[name]['leaked'] += obs_in_ground
             obs_leak_accum[name]['total_obs'] += int((gt_obs & valid_mask).sum())
 
-            # --- Stage 2 (delta-r) ---
-            t2 = time.time()
-            r2 = pipeline.stage2_complete(pts)
-            t2_end = time.time()
-            # Stage 2 incluye Stage 1 internamente, así que el tiempo real de Stage 2 solo es:
-            timing_s2[name].append((t2_end - t2) * 1000)
-
-            # Métricas de detección de obstáculos (solo puntos válidos)
-            m_obs = compute_metrics(gt_obs, r2['obs_mask'], valid_mask)
+            # Métricas de detección de obstáculos (non-ground = obstáculo)
+            pred_obs = ~pred_ground
+            m_obs = compute_metrics(gt_obs, pred_obs, valid_mask)
             obs_accum[name]['tp'] += m_obs['tp']
             obs_accum[name]['fp'] += m_obs['fp']
             obs_accum[name]['fn'] += m_obs['fn']
 
             n_walls = len(r1.get('rejected_walls', []))
-            print(f"    {name:<30} | gnd P={100*m_gnd['precision']:.1f}% R={100*m_gnd['recall']:.1f}% | "
-                  f"leak={obs_in_ground} | obs F1={100*m_obs['f1']:.1f}% | walls={n_walls} | "
-                  f"S1={timing_s1[name][-1]:.0f}ms S2={timing_s2[name][-1]:.0f}ms")
+            if (i + 1) % 50 == 0 or i == 0:
+                print(f"    {name:<30} | gnd P={100*m_gnd['precision']:.1f}% R={100*m_gnd['recall']:.1f}% | "
+                      f"leak={obs_in_ground} | obs F1={100*m_obs['f1']:.1f}% | walls={n_walls} | "
+                      f"{timing_s1[name][-1]:.0f}ms")
 
     # ========================================
     # RESUMEN
@@ -222,10 +204,10 @@ def test_sequence(seq, n_frames, scan_start, stride=1):
         leak_pct = 100 * leak['leaked'] / leak['total_obs'] if leak['total_obs'] > 0 else 0
         print(f"  {name:<30} {100*p:>7.1f}% {100*r:>7.1f}% {100*f1:>7.1f}% {leak['leaked']:>10} {leak_pct:>7.1f}%")
 
-    # --- Obstacle Detection ---
-    print(f"\n  DETECCIÓN DE OBSTÁCULOS (Stage 2)")
-    print(f"  {'Config':<30} {'Obs P':>8} {'Obs R':>8} {'Obs F1':>8} {'Obs IoU':>8} {'FP':>8} {'FN':>8}")
-    print(f"  {'-'*80}")
+    # --- Obstacle Detection (non-ground = obstáculo) ---
+    print(f"\n  DETECCIÓN DE OBSTÁCULOS (non-ground = obstáculo)")
+    print(f"  {'Config':<30} {'Obs P':>8} {'Obs R':>8} {'Obs F1':>8} {'Obs IoU':>8} {'FP':>10} {'FN':>10}")
+    print(f"  {'-'*90}")
 
     for name in CONFIGS:
         o = obs_accum[name]
@@ -233,24 +215,22 @@ def test_sequence(seq, n_frames, scan_start, stride=1):
         r = o['tp'] / (o['tp'] + o['fn']) if (o['tp'] + o['fn']) > 0 else 0
         f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0
         iou = o['tp'] / (o['tp'] + o['fp'] + o['fn']) if (o['tp'] + o['fp'] + o['fn']) > 0 else 0
-        print(f"  {name:<30} {100*p:>7.1f}% {100*r:>7.1f}% {100*f1:>7.1f}% {100*iou:>7.1f}% {o['fp']:>8} {o['fn']:>8}")
+        print(f"  {name:<30} {100*p:>7.1f}% {100*r:>7.1f}% {100*f1:>7.1f}% {100*iou:>7.1f}% {o['fp']:>10} {o['fn']:>10}")
 
     # --- Timing ---
     print(f"\n  TIMING (media por frame)")
-    print(f"  {'Config':<30} {'Stage 1':>10} {'Stage 2 total':>14}")
-    print(f"  {'-'*60}")
+    print(f"  {'Config':<30} {'ms/frame':>10}")
+    print(f"  {'-'*45}")
 
     for name in CONFIGS:
         s1_mean = np.mean(timing_s1[name])
-        s2_mean = np.mean(timing_s2[name])
-        print(f"  {name:<30} {s1_mean:>9.1f}ms {s2_mean:>13.1f}ms")
+        print(f"  {name:<30} {s1_mean:>9.1f}ms")
 
     return {
         'ground': gnd_accum,
         'obs_leak': obs_leak_accum,
         'obs': obs_accum,
         'timing_s1': timing_s1,
-        'timing_s2': timing_s2,
     }
 
 
