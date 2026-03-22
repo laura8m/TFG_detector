@@ -108,6 +108,39 @@ WR mejora de forma consistente en todos los rangos, con mayor impacto en **dista
 
 WR reduce el obstacle leak a un tercio: 12.3% → 4.3% (de 6.4M a 2.2M puntos obstaculo mal clasificados como ground).
 
+### Comparacion con Estado del Arte (val seq 08)
+
+| | **PW++ + WR (nuestro)** | **Cylinder3D** (Zhu et al., CVPR 2021) |
+|---|---|---|
+| **F1** | 95.31% | 96.90% |
+| **IoU** | 91.03% | 93.98% |
+| **Precision** | 94.83% | 95.41% |
+| **Recall** | 95.79% | 98.43% |
+| GPU | No | Si (RTX 6000, 48GB) |
+| Entrenamiento | No | Si (dias) |
+| Latencia | 41 ms | ~50-100 ms |
+| Parametros | 0 (geometrico) | ~55M |
+| Tipo | Binario (obs/ground) | Semantico (19 clases) |
+
+**Diferencia: solo -1.59% F1 y -2.95% IoU.** Nuestro pipeline geometrico sin GPU ni entrenamiento alcanza rendimiento competitivo frente a un modelo deep learning top del leaderboard SemanticKITTI.
+
+Nota: Cylinder3D realiza segmentacion semantica completa (19 clases). Para la comparacion, ambas salidas se colapsan a la tarea binaria obstaculo/ground con el mismo protocolo (OBSTACLE_LABELS, IGNORE_LABELS, valid_mask).
+
+**Recall por clase — comparacion directa:**
+
+| Clase | N puntos | PW++ + WR | Cylinder3D | Delta |
+|-------|----------|-----------|------------|-------|
+| fence | 2,525,721 | 96.38% | 98.25% | -1.87% |
+| vegetation | 29,200,604 | 94.73% | 97.80% | -3.07% |
+| building | 11,373,274 | 97.49% | 99.62% | -2.13% |
+| car | 6,189,620 | 96.26% | 99.36% | -3.10% |
+| trunk | 1,101,779 | 95.84% | 98.39% | -2.55% |
+| person | 95,976 | 95.42% | 98.01% | -2.59% |
+| pole | 333,913 | 96.27% | 97.55% | -1.28% |
+| sign | 76,753 | 99.86% | 99.93% | -0.07% |
+
+Cylinder3D gana en recall en todas las clases (~2-3%), pero nuestro pipeline supera el 95% en la mayoria de clases sin necesidad de GPU ni entrenamiento. La diferencia es menor en **fence** (-1.87%) y **pole** (-1.28%), donde la geometria local es suficiente para detectar la estructura.
+
 ### Parametros optimos (grid search)
 
 Optimizados con protocolo SemanticKITTI (tuning en train, evaluacion en val):
@@ -225,7 +258,7 @@ cd ~/lidar_ws/TFG-LiDAR-Geometry/sota_idea
 
 **Problema**: Delta-r compara rango medido con rango esperado por plano RANSAC. Los planos ruidosos generan delta-r incorrecto → FPs. Ademas, reclasifica non-ground correctos como ground.
 
-**Solucion**: Modo conservador — solo rescata ground→obstaculo en bins fiables (nz >= 0.95). Nunca degrada Stage 1. Mejora +0.32% sobre delta-r original, pero no supera WR solo (-0.03%). Desactivado por defecto, disponible para conduccion real donde bordillos y hoyos son relevantes.
+**Solucion**: Modo conservador — solo rescata ground→obstaculo en bins fiables (nz >= 0.95). No reclasifica non-ground como ground (solo añade, nunca quita detecciones de Stage 1). Mejora +0.32% sobre delta-r original, pero el F1 global baja -0.03% vs WR solo porque detecta bordillos y desniveles que el GT considera ground (FPs). Desactivado por defecto, disponible para conduccion real donde bordillos y hoyos son relevantes.
 
 ### 3. Evaluacion con Labels Incorrectas (corregido)
 
