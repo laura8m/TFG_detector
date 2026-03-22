@@ -70,9 +70,9 @@ class PipelineConfig:
     # STAGE 2: Detección de anomalías delta-r
     # ========================================
 
+    enable_delta_r: bool = False  # Delta-r desactivado: no mejora en SemanticKITTI (-0.03% F1)
     threshold_obs: float = -0.8  # Obstáculo positivo (m) — optimizado grid search conservador
     threshold_void: float = 1.5  # Void/depresión (m) — optimizado grid search conservador
-    delta_r_conservative: bool = True  # Modo conservador: solo rescate, nunca degradar Stage 1
     delta_r_min_nz: float = 0.95  # nz mínimo para considerar bin fiable — optimizado grid search
 
     # ========================================
@@ -772,36 +772,31 @@ class LidarPipelineSuite:
         threshold_obs = self.config.threshold_obs
         threshold_void = self.config.threshold_void
 
-        if self.config.delta_r_conservative and nonground_indices is not None:
-            # --- MODO CONSERVADOR ---
-            # Empezar con la clasificación de Stage 1 (non-ground = obstáculo)
-            obs_mask_final = np.zeros(N, dtype=bool)
-            obs_mask_final[nonground_indices] = True  # Preservar Stage 1
+        # --- MODO CONSERVADOR (único modo) ---
+        # Empezar con la clasificación de Stage 1 (non-ground = obstáculo)
+        obs_mask_final = np.zeros(N, dtype=bool)
+        obs_mask_final[nonground_indices] = True  # Preservar Stage 1
 
-            # Máscara de bins fiables: nz >= delta_r_min_nz
-            nz_per_point = np.abs(n_per_point[:, 2])
-            reliable_bin = nz_per_point >= self.config.delta_r_min_nz
+        # Máscara de bins fiables: nz >= delta_r_min_nz
+        nz_per_point = np.abs(n_per_point[:, 2])
+        reliable_bin = nz_per_point >= self.config.delta_r_min_nz
 
-            # Solo en puntos ground + bin fiable: rescatar como obstáculo o void
-            ground_mask_s1 = np.ones(N, dtype=bool)
-            ground_mask_s1[nonground_indices] = False
-            rescatable = ground_mask_s1 & reliable_bin
+        # Solo en puntos ground + bin fiable: rescatar como obstáculo o void
+        ground_mask_s1 = np.ones(N, dtype=bool)
+        ground_mask_s1[nonground_indices] = False
+        rescatable = ground_mask_s1 & reliable_bin
 
-            # Rescate: ground→obstáculo si delta-r indica anomalía
-            rescued_obs = rescatable & (delta_r < threshold_obs)
-            rescued_void = rescatable & (delta_r > threshold_void)
-            obs_mask_final |= rescued_obs | rescued_void
+        # Rescate: ground→obstáculo si delta-r indica anomalía
+        rescued_obs = rescatable & (delta_r < threshold_obs)
+        rescued_void = rescatable & (delta_r > threshold_void)
+        obs_mask_final |= rescued_obs | rescued_void
 
-            void_mask_final = rescued_void.copy()
+        void_mask_final = rescued_void.copy()
 
-            n_rescued = int(rescued_obs.sum() + rescued_void.sum())
-            if self.config.verbose:
-                n_reliable = int(reliable_bin.sum())
-                print(f"  [Delta-r conservador] Bins fiables: {n_reliable}/{N} pts | Rescatados: {n_rescued}")
-        else:
-            # --- MODO ORIGINAL ---
-            obs_mask_final = (delta_r < threshold_obs) | (delta_r > threshold_void)
-            void_mask_final = delta_r > threshold_void
+        n_rescued = int(rescued_obs.sum() + rescued_void.sum())
+        if self.config.verbose:
+            n_reliable = int(reliable_bin.sum())
+            print(f"  [Delta-r conservador] Bins fiables: {n_reliable}/{N} pts | Rescatados: {n_rescued}")
 
         # Forzar paredes rechazadas como obstáculos
         if hasattr(self, 'rejected_wall_indices') and len(self.rejected_wall_indices) > 0:
@@ -848,7 +843,25 @@ class LidarPipelineSuite:
         # Stage 1: Segmentación de suelo + rechazo de paredes
         stage1_result = self.stage1_complete(points)
 
-        # Stage 2: delta-r
+        N = len(points)
+
+        if not self.config.enable_delta_r:
+            # Sin delta-r: Stage 1 es la clasificación final
+            obs_mask = np.zeros(N, dtype=bool)
+            obs_mask[stage1_result['nonground_indices']] = True
+            ground_mask = ~obs_mask
+            return {
+                **stage1_result,
+                'delta_r': np.zeros(N, dtype=np.float32),
+                'likelihood': np.where(obs_mask, 2.0, -2.0).astype(np.float32),
+                'obs_mask': obs_mask,
+                'ground_mask': ground_mask,
+                'void_mask': np.zeros(N, dtype=bool),
+                'timing_ms': stage1_result['timing_ms'],
+                'timing_total_ms': stage1_result['timing_ms'],
+            }
+
+        # Stage 2: delta-r conservador
         stage2_result = self.compute_delta_r(
             points=points,
             ground_indices=stage1_result['ground_indices'],
