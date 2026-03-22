@@ -15,7 +15,7 @@ import time
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from data_paths import get_sequence_paths
+from data_paths import get_velodyne_dir, get_labels_dir
 from lidar_pipeline_suite import LidarPipelineSuite, PipelineConfig
 
 # === Labels SemanticKITTI ===
@@ -84,11 +84,10 @@ def ransac_ground_segmentation(points, n_iterations=100, distance_threshold=0.3,
     return ground_mask
 
 
-def load_scan(scan_id, seq, paths):
+def load_scan(scan_id, seq):
     """Carga un scan y sus labels."""
-    velodyne_dir, label_dir = paths
-    bin_file = os.path.join(velodyne_dir, f"{scan_id:06d}.bin")
-    label_file = os.path.join(label_dir, f"{scan_id:06d}.label")
+    bin_file = str(get_velodyne_dir(seq) / f"{scan_id:06d}.bin")
+    label_file = str(get_labels_dir(seq) / f"{scan_id:06d}.label")
 
     points = np.fromfile(bin_file, dtype=np.float32).reshape(-1, 4)
     labels = np.fromfile(label_file, dtype=np.uint32) & 0xFFFF
@@ -118,10 +117,9 @@ def main():
     args = parser.parse_args()
 
     seq = args.seq
-    paths = get_sequence_paths(seq)
 
     # Contar frames disponibles
-    velodyne_dir = paths[0]
+    velodyne_dir = str(get_velodyne_dir(seq))
     n_total = len([f for f in os.listdir(velodyne_dir) if f.endswith('.bin')])
     scan_ids = list(range(0, n_total, args.stride))
     n_frames = len(scan_ids)
@@ -136,7 +134,7 @@ def main():
     tp_r, fp_r, fn_r = 0, 0, 0
     t0 = time.time()
     for scan_id in scan_ids:
-        points, gt_obs, valid_mask = load_scan(scan_id, seq, paths)
+        points, gt_obs, valid_mask = load_scan(scan_id, seq)
         ground_mask = ransac_ground_segmentation(
             points, n_iterations=args.ransac_iters,
             distance_threshold=args.ransac_dist
@@ -155,7 +153,7 @@ def main():
     tp_pw, fp_pw, fn_pw = 0, 0, 0
     t0 = time.time()
     for scan_id in scan_ids:
-        points, gt_obs, valid_mask = load_scan(scan_id, seq, paths)
+        points, gt_obs, valid_mask = load_scan(scan_id, seq)
         result = pipe_pw.stage2_complete(points)
         pred_obs = result['obs_mask']
         tp, fp, fn = compute_metrics(gt_obs, pred_obs, valid_mask)
@@ -171,7 +169,7 @@ def main():
     tp_wr, fp_wr, fn_wr = 0, 0, 0
     t0 = time.time()
     for scan_id in scan_ids:
-        points, gt_obs, valid_mask = load_scan(scan_id, seq, paths)
+        points, gt_obs, valid_mask = load_scan(scan_id, seq)
         result = pipe_wr.stage2_complete(points)
         pred_obs = result['obs_mask']
         tp, fp, fn = compute_metrics(gt_obs, pred_obs, valid_mask)
