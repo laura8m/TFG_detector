@@ -148,7 +148,7 @@ def main():
 
     # === PW++ vanilla ===
     print("Evaluando: PW++ vanilla...")
-    config_pw = PipelineConfig(enable_wall_rejection=False, enable_delta_r=False)
+    config_pw = PipelineConfig(enable_hybrid_wall_rejection=False, enable_delta_r=False)
     pipe_pw = LidarPipelineSuite(config_pw)
     tp_pw, fp_pw, fn_pw = 0, 0, 0
     t0 = time.time()
