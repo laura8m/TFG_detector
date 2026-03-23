@@ -252,7 +252,7 @@ cd ~/lidar_ws/TFG-LiDAR-Geometry/sota_idea
 
 **Problema**: Patchwork++ ajusta planos por bins CZM. Si un bin contiene la base de una pared, el plano ajustado es vertical y la base se clasifica como ground. Afecta especialmente buildings (+17% recall con WR) y fences (+12%).
 
-**Solucion**: Rechazo hibrido en dos fases. Fase 1 (bin-wise) detecta bins sospechosos por normal vertical insuficiente (nz < 0.9). Fase 2 (point-wise) refina con voxel grid 2D (percentiles P95-P5) para no rechazar bins completos. Reduce obstacle leak de 13.2% a 5.8%.
+**Solucion**: Rechazo hibrido en dos fases. Fase 1 (bin-wise) detecta bins sospechosos por normal vertical insuficiente (nz < 0.9). Fase 2 (point-wise) refina con voxel grid 2D (percentiles P95-P5) para no rechazar bins completos. Reduce obstacle leak de 12.3% a 4.3%.
 
 ### 2. Delta-r Original Empeora el Pipeline
 
