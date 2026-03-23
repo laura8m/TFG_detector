@@ -5,10 +5,9 @@ Visualizador del pipeline LiDAR por stages en RViz.
 Publica la nube de puntos coloreada por clasificación después de cada stage,
 para ver la evolución del pipeline.
 
-Pipeline de 3 stages:
+Pipeline de 2 stages:
   1. Ground estimation (Patchwork++ + wall rejection)
-  2. Delta-r anomaly detection
-  3. DBSCAN clustering + hull generation
+  2. Delta-r conservador (opcional, --delta_r)
 
 Colores en RViz (usar PointCloud2 con color por campo 'rgb'):
   - Verde:    suelo (ground)
@@ -132,7 +131,6 @@ class PipelineVizNode(Node):
         # Publishers por stage
         self.pub_stage1 = self.create_publisher(PointCloud2, '/stage1_cloud', 10)
         self.pub_stage2 = self.create_publisher(PointCloud2, '/stage2_cloud', 10)
-        self.pub_stage3 = self.create_publisher(PointCloud2, '/stage3_cloud', 10)
         self.pub_gt     = self.create_publisher(PointCloud2, '/gt_cloud', 10)
 
         # Timer para ejecutar una vez tras inicializar
@@ -226,40 +224,6 @@ class PipelineVizNode(Node):
 
         return rgb
 
-    def colorize_stage3(self, points, result):
-        """Stage 3: clusters coloreados (DBSCAN)."""
-        N = len(points)
-        rgb = np.full(N, COLOR_UNCERTAIN, dtype=np.float32)
-
-        ground_idx = result.get('ground_indices', np.array([]))
-        if len(ground_idx) > 0:
-            rgb[ground_idx] = COLOR_GROUND
-
-        obs = result['obs_mask']
-        if 'cluster_labels' in result and np.any(obs):
-            labels = result['cluster_labels']
-            unique_labels = set(labels[obs]) - {-1}
-
-            # Generar colores distintos por cluster
-            import colorsys
-            n_colors = max(len(unique_labels), 1)
-            cluster_colors = {}
-            for i, label in enumerate(sorted(unique_labels)):
-                h = i / n_colors
-                r, g, b = colorsys.hsv_to_rgb(h, 0.9, 0.9)
-                cluster_colors[label] = rgb_to_float(int(r*255), int(g*255), int(b*255))
-
-            for idx in np.where(obs)[0]:
-                lbl = labels[idx]
-                if lbl in cluster_colors:
-                    rgb[idx] = cluster_colors[lbl]
-                else:
-                    rgb[idx] = COLOR_OBSTACLE
-        else:
-            rgb[obs] = COLOR_OBSTACLE
-
-        return rgb
-
     def run_pipeline(self):
         if self.done:
             return
@@ -273,7 +237,7 @@ class PipelineVizNode(Node):
         self.get_logger().info(f"=== Pipeline Viz: seq {seq}, stages {stages} ===")
 
         # Inicializar pipeline
-        config = PipelineConfig(verbose=False)
+        config = PipelineConfig(verbose=False, enable_delta_r=args.delta_r)
         self.pipeline = LidarPipelineSuite(config)
 
         # Cargar poses
@@ -358,6 +322,7 @@ def main():
     parser.add_argument('--stages', type=int, nargs='+', default=[1, 2],
                         help='Stages a visualizar (default: 1 2)')
     parser.add_argument('--no-rviz', action='store_true', help='No lanzar RViz automáticamente')
+    parser.add_argument('--delta_r', action='store_true', help='Activar delta-r conservador (muestra voids en azul)')
 
     clean_args = [a for a in sys.argv[1:] if not a.startswith('--ros-args')]
     args = parser.parse_args(clean_args)
