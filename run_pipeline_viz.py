@@ -287,16 +287,8 @@ class PipelineVizNode(Node):
         # ----------------------------------------------------------------
         points = load_scan(scan_final, seq)
 
-        # Stage 1+2+3 completo (stage3_complete ejecuta stage1+2+3 internamente)
-        if 3 in stages:
-            result_s3 = self.pipeline.stage3_complete(points)
-
-            # Snapshot Stage 2: usar el resultado que stage3 calculó internamente
-            result_s2 = self.pipeline.last_stage2_result
-        else:
-            # Solo stages 1 y/o 2 — no necesitamos Stage 3
-            result_s2 = self.pipeline.stage2_complete(points)
-            result_s3 = None
+        # Stage 1+2 (pipeline óptimo: PW++ + WR, sin DBSCAN)
+        result_s2 = self.pipeline.stage2_complete(points)
 
         # Stage 1 info viene dentro de result_s2
         result_s1 = result_s2
@@ -322,26 +314,17 @@ class PipelineVizNode(Node):
                 f"uncertain={n_unc}, total={len(points)}"
             )
 
-        if 3 in stages and result_s3 is not None:
-            rgb3 = self.colorize_stage3(points, result_s3)
-            self.pub_stage3.publish(self.create_rgb_cloud(points, rgb3))
-            self.get_logger().info(
-                f"    Stage 3: clusters={result_s3.get('n_clusters', 0)}, "
-                f"removed={result_s3.get('n_cluster_total_removed', 0)}"
-            )
-
         # Guardar snapshots por stage para republish
         self._snapshots = {
             's1': result_s1,
             's2': result_s2,
-            's3': result_s3,
         }
 
         # Ground truth
         self.publish_gt(scan_final, seq, points)
 
         self.get_logger().info("\n=== Publicado. Mantén RViz abierto. Ctrl+C para salir. ===")
-        self.get_logger().info("  Topics: /stage1_cloud /stage2_cloud /stage3_cloud /gt_cloud")
+        self.get_logger().info("  Topics: /stage1_cloud /stage2_cloud /gt_cloud")
         self.get_logger().info("  En RViz: Add > By topic > PointCloud2, Color: 'rgb'")
 
         # Re-publicar periódicamente para que RViz no pierda los mensajes
@@ -361,10 +344,6 @@ class PipelineVizNode(Node):
         if 2 in stages and snaps.get('s2') is not None:
             rgb2 = self.colorize_stage2(points, snaps['s2'])
             self.pub_stage2.publish(self.create_rgb_cloud(points, rgb2))
-        if 3 in stages and snaps.get('s3') is not None:
-            rgb3 = self.colorize_stage3(points, snaps['s3'])
-            self.pub_stage3.publish(self.create_rgb_cloud(points, rgb3))
-
         self.publish_gt(self.args.scan_end, self.args.seq, points)
 
 
@@ -376,8 +355,8 @@ def main():
     parser.add_argument('--scan', type=int, default=None, help='Frame único (sobrescribe scan_start/end)')
     parser.add_argument('--scan_start', type=int, default=0, help='Primer frame')
     parser.add_argument('--scan_end', type=int, default=10, help='Último frame')
-    parser.add_argument('--stages', type=int, nargs='+', default=[1, 2, 3],
-                        help='Stages a visualizar (default: 1 2 3)')
+    parser.add_argument('--stages', type=int, nargs='+', default=[1, 2],
+                        help='Stages a visualizar (default: 1 2)')
     parser.add_argument('--no-rviz', action='store_true', help='No lanzar RViz automáticamente')
 
     clean_args = [a for a in sys.argv[1:] if not a.startswith('--ros-args')]

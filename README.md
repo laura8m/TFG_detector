@@ -110,36 +110,36 @@ WR reduce el obstacle leak a un tercio: 12.3% → 4.3% (de 6.4M a 2.2M puntos ob
 
 ### Comparacion con Estado del Arte (val seq 08)
 
-| | **PW++ + WR (nuestro)** | **Cylinder3D** (Zhu et al., CVPR 2021) |
-|---|---|---|
-| **F1** | 95.31% | 96.90% |
-| **IoU** | 91.03% | 93.98% |
-| **Precision** | 94.83% | 95.41% |
-| **Recall** | 95.79% | 98.43% |
-| GPU | No | Si (RTX 6000, 48GB) |
-| Entrenamiento | No | Si (dias) |
-| Latencia | 41 ms | ~50-100 ms |
-| Parametros | 0 (geometrico) | ~55M |
-| Tipo | Binario (obs/ground) | Semantico (19 clases) |
+| Metodo | F1 | IoU | P | R | ms/frame | GPU | Entrenamiento |
+|--------|------|------|------|------|----------|-----|---------------|
+| RANSAC global | 91.89% | 84.99% | 96.32% | 87.84% | 298.6 | No | No |
+| PW++ vanilla | 93.25% | 87.35% | 98.66% | 88.39% | 36.9 | No | No |
+| **PW++ + WR (nuestro)** | **95.31%** | **91.03%** | **94.83%** | **95.79%** | **46.6** | **No** | **No** |
+| RangeNet++ (Milioto et al., IROS 2019) | 96.65% | 93.52% | 95.16% | 98.19% | ~25 | Si (RTX 6000) | Si (dias, ~50M params) |
+| Cylinder3D (Zhu et al., CVPR 2021) | 96.90% | 93.98% | 95.41% | 98.43% | ~25 | Si (RTX 6000) | Si (dias, ~55M params) |
 
-**Diferencia: solo -1.59% F1 y -2.95% IoU.** Nuestro pipeline geometrico sin GPU ni entrenamiento alcanza rendimiento competitivo frente a un modelo deep learning top del leaderboard SemanticKITTI.
+**Nuestro pipeline geometrico sin GPU ni entrenamiento:**
+- Supera RANSAC global en +3.42% F1 y es 6x mas rapido
+- Supera PW++ vanilla en +2.06% F1 con solo +10ms de latencia
+- Solo -1.34% F1 vs RangeNet++ y -1.59% vs Cylinder3D
+- Alcanza ~98% del rendimiento del estado del arte DL sin GPU ni entrenamiento
 
-Nota: Cylinder3D realiza segmentacion semantica completa (19 clases). Para la comparacion, ambas salidas se colapsan a la tarea binaria obstaculo/ground con el mismo protocolo (OBSTACLE_LABELS, IGNORE_LABELS, valid_mask).
+Nota: RangeNet++ y Cylinder3D realizan segmentacion semantica completa (19 clases). Para la comparacion, todas las salidas se colapsan a la tarea binaria obstaculo/ground con el mismo protocolo (OBSTACLE_LABELS, IGNORE_LABELS, valid_mask).
 
 **Recall por clase — comparacion directa:**
 
-| Clase | N puntos | PW++ + WR | Cylinder3D | Delta |
-|-------|----------|-----------|------------|-------|
-| fence | 2,525,721 | 96.38% | 98.25% | -1.87% |
-| vegetation | 29,200,604 | 94.73% | 97.80% | -3.07% |
-| building | 11,373,274 | 97.49% | 99.62% | -2.13% |
-| car | 6,189,620 | 96.26% | 99.36% | -3.10% |
-| trunk | 1,101,779 | 95.84% | 98.39% | -2.55% |
-| person | 95,976 | 95.42% | 98.01% | -2.59% |
-| pole | 333,913 | 96.27% | 97.55% | -1.28% |
-| sign | 76,753 | 99.86% | 99.93% | -0.07% |
+| Clase | N puntos | PW++ + WR | RangeNet++ | Cylinder3D |
+|-------|----------|-----------|------------|------------|
+| vegetation | 29,200,604 | 94.73% | 97.46% | 97.80% |
+| building | 11,373,274 | 97.49% | 99.34% | 99.62% |
+| car | 6,189,620 | 96.26% | 99.49% | 99.36% |
+| fence | 2,525,721 | 96.38% | 97.93% | 98.25% |
+| trunk | 1,101,779 | 95.84% | 98.37% | 98.39% |
+| person | 95,976 | 95.42% | 97.85% | 98.01% |
+| pole | 333,913 | 96.27% | 97.87% | 97.55% |
+| sign | 76,753 | 99.86% | 99.96% | 99.93% |
 
-Cylinder3D gana en recall en todas las clases (~2-3%), pero nuestro pipeline supera el 95% en la mayoria de clases sin necesidad de GPU ni entrenamiento. La diferencia es menor en **fence** (-1.87%) y **pole** (-1.28%), donde la geometria local es suficiente para detectar la estructura.
+Nota: esto **no es clasificacion semantica** — nuestro pipeline no distingue entre clases. La tabla muestra el **recall de deteccion como obstaculo** para cada tipo de objeto: que porcentaje de puntos de cada clase son correctamente clasificados como non-ground/obstaculo. Los metodos DL ganan en recall en todas las clases (~2-3%), pero nuestro pipeline supera el 95% en la mayoria de clases sin GPU ni entrenamiento. La diferencia es menor en **sign** (-0.10%), **pole** (-1.28%) y **fence** (-1.55%), donde la geometria local es suficiente para detectar la estructura.
 
 ### Parametros optimos (grid search)
 
