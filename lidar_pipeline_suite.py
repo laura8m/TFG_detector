@@ -51,7 +51,7 @@ class PipelineConfig:
     num_iter: int = 3  # Iteraciones de refinamiento de plano
     num_lpr: int = 20  # Lowest Point Representative
     num_min_pts: int = 10  # Puntos mínimos por bin
-    th_dist: float = 0.2  # Umbral de distancia para inliers (m)
+    th_dist: float = 0.125  # Umbral de distancia para inliers (m) — default paper PW++
     uprightness_thr: float = 0.707  # Umbral de verticalidad (cos(45°))
 
     # === Rechazo híbrido de paredes ===
