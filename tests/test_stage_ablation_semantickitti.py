@@ -150,7 +150,7 @@ def main():
     configs = {
         'PW++ vanilla': PipelineConfig(
             enable_hybrid_wall_rejection=False,
-            delta_r_conservative=False,
+            enable_delta_r=False,
             verbose=False,
         ),
         'PW++ + Wall Rejection': PipelineConfig(
@@ -158,7 +158,7 @@ def main():
             wall_rejection_slope=0.9,
             wall_height_diff_threshold=0.2,
             wall_kdtree_radius=0.3,
-            delta_r_conservative=False,
+            enable_delta_r=False,
             verbose=False,
         ),
         'PW++ + WR + delta-r conservador': PipelineConfig(
@@ -168,7 +168,7 @@ def main():
             wall_kdtree_radius=0.3,
             threshold_obs=-0.8,
             threshold_void=1.5,
-            delta_r_conservative=True,
+            enable_delta_r=True,
             delta_r_min_nz=0.95,
             verbose=False,
         ),
@@ -179,7 +179,7 @@ def main():
             wall_kdtree_radius=0.3,
             threshold_obs=-0.8,
             threshold_void=1.5,
-            delta_r_conservative=True,
+            enable_delta_r=True,
             delta_r_min_nz=0.95,
             cluster_eps=1.2,
             cluster_min_samples=12,

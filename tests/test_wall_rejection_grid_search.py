@@ -128,9 +128,9 @@ def metrics_from_accum(tp, fp, fn):
 
 def get_wall_rejection_grid():
     return {
-        'wall_rejection_slope':       [0.5, 0.6, 0.7, 0.8, 0.9],
-        'wall_height_diff_threshold': [0.15, 0.2, 0.3, 0.4, 0.5],
-        'wall_kdtree_radius':         [0.3, 0.5, 0.7, 1.0],
+        'wall_rejection_slope':       [0.85, 0.90, 0.95, 1.0],
+        'wall_height_diff_threshold': [0.10, 0.12, 0.15, 0.18, 0.20],
+        'wall_kdtree_radius':         [0.15, 0.20, 0.25, 0.30, 0.35],
     }
 
 
