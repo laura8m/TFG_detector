@@ -45,15 +45,15 @@ def main():
 
     # Contar frames
     scan_ids = list(range(0, 99999, stride))
-    first_scan = get_scan_file(scan_ids[0], seq)
-    if first_scan is None:
+    first_scan = get_scan_file(seq, scan_ids[0])
+    if not first_scan.exists():
         print(f"No se encontró la secuencia {seq}")
         return
 
     # Filtrar scan_ids existentes
     valid_ids = []
     for sid in scan_ids:
-        if get_scan_file(sid, seq) is not None:
+        if get_scan_file(seq, sid).exists():
             valid_ids.append(sid)
     scan_ids = valid_ids
 
@@ -69,8 +69,8 @@ def main():
     t0 = time.time()
 
     for i, scan_id in enumerate(scan_ids):
-        scan_file = get_scan_file(scan_id, seq)
-        label_file = get_label_file(scan_id, seq)
+        scan_file = get_scan_file(seq, scan_id)
+        label_file = get_label_file(seq, scan_id)
 
         pts = np.fromfile(scan_file, dtype=np.float32).reshape(-1, 4)[:, :3]
 
@@ -93,7 +93,7 @@ def main():
         all_h.append(h_rescued)
 
         # Si hay labels, separar TP de FP
-        if label_file is not None:
+        if label_file.exists():
             labels = np.fromfile(label_file, dtype=np.uint32) & 0xFFFF
             gt_obs = np.isin(labels, OBSTACLE_LABELS)
             valid = ~np.isin(labels, IGNORE_LABELS)
