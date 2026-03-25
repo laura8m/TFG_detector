@@ -67,6 +67,18 @@ class PipelineConfig:
     wall_kdtree_radius: float = 0.3  # Radio de vecindad local (m) — optimizado grid search
 
     # ========================================
+    # DETECCIÓN DE BORDILLOS (Inter-Ring Height Discontinuity)
+    # ========================================
+
+    enable_curb_detection: bool = False  # Desactivado por defecto (empeora SemanticKITTI)
+    curb_height_min: float = 0.08  # Altura mínima del bordillo (m) — configurable por vehículo
+    curb_height_max: float = 0.25  # Altura máxima (>25cm = pared, ya detectada por WR)
+    curb_min_consecutive: int = 3  # Puntos consecutivos mínimos para confirmar bordillo
+    n_rings: int = 64  # Número de rings del LiDAR (Velodyne HDL-64E)
+    fov_up_deg: float = 2.0  # FOV superior (grados)
+    fov_down_deg: float = -24.33  # FOV inferior (grados)
+
+    # ========================================
     # STAGE 2: Detección de anomalías delta-r
     # ========================================
 
@@ -826,6 +838,102 @@ class LidarPipelineSuite:
             'timing_ms': timing_ms
         }
 
+    def detect_curbs(self, points: np.ndarray, ground_mask: np.ndarray) -> np.ndarray:
+        """
+        Detección de bordillos por discontinuidad de altura inter-ring.
+
+        Compara la Z de puntos ground en rings consecutivos (k, k+1) emparejados
+        por azimut. Un salto de Z entre curb_height_min y curb_height_max indica
+        un bordillo.
+
+        Args:
+            points: (N, 3) nube de puntos
+            ground_mask: (N,) máscara de puntos ground
+
+        Returns:
+            curb_mask: (N,) máscara de puntos detectados como bordillo
+        """
+        cfg = self.config
+        N = len(points)
+        curb_mask = np.zeros(N, dtype=bool)
+
+        if not np.any(ground_mask):
+            return curb_mask
+
+        t0 = time.time()
+
+        # 1. Asignar ring ID por ángulo de elevación
+        x, y, z = points[:, 0], points[:, 1], points[:, 2]
+        r_xy = np.sqrt(x**2 + y**2)
+        elevation = np.arctan2(z, r_xy)  # radianes
+
+        fov_up = np.radians(cfg.fov_up_deg)
+        fov_down = np.radians(cfg.fov_down_deg)
+        fov_total = fov_up - fov_down
+
+        # Normalizar elevación a [0, 1] y mapear a ring [0, n_rings-1]
+        ring_id = np.clip(
+            ((fov_up - elevation) / fov_total * cfg.n_rings).astype(np.int32),
+            0, cfg.n_rings - 1
+        )
+
+        # 2. Calcular azimut
+        azimuth = np.arctan2(y, x)  # [-pi, pi]
+
+        # 3. Para cada par de rings consecutivos, emparejar por azimut
+        ground_idx = np.where(ground_mask)[0]
+        ground_rings = ring_id[ground_idx]
+        ground_az = azimuth[ground_idx]
+        ground_z = z[ground_idx]
+
+        for k in range(cfg.n_rings - 1):
+            # Puntos ground en ring k y k+1
+            mask_k = ground_rings == k
+            mask_k1 = ground_rings == (k + 1)
+
+            idx_k = ground_idx[mask_k]
+            idx_k1 = ground_idx[mask_k1]
+
+            if len(idx_k) < cfg.curb_min_consecutive or len(idx_k1) < cfg.curb_min_consecutive:
+                continue
+
+            az_k = ground_az[mask_k]
+            az_k1 = ground_az[mask_k1]
+            z_k = ground_z[mask_k]
+            z_k1 = ground_z[mask_k1]
+
+            # Ordenar ring k+1 por azimut para búsqueda eficiente
+            sort_k1 = np.argsort(az_k1)
+            az_k1_sorted = az_k1[sort_k1]
+            z_k1_sorted = z_k1[sort_k1]
+            idx_k1_sorted = idx_k1[sort_k1]
+
+            # Para cada punto en ring k, encontrar el vecino más cercano en azimut en ring k+1
+            insert_pos = np.searchsorted(az_k1_sorted, az_k)
+            insert_pos = np.clip(insert_pos, 0, len(az_k1_sorted) - 1)
+
+            # Calcular delta_Z entre rings emparejados
+            dz = z_k - z_k1_sorted[insert_pos]
+
+            # Bordillo: salto de altura dentro del rango [min, max]
+            is_curb = (np.abs(dz) >= cfg.curb_height_min) & (np.abs(dz) <= cfg.curb_height_max)
+
+            # Verificar coherencia: al menos curb_min_consecutive puntos seguidos
+            if np.sum(is_curb) >= cfg.curb_min_consecutive:
+                # Marcar puntos del ring superior (el que está en la acera)
+                curb_points_k = idx_k[is_curb]
+                curb_points_k1 = idx_k1_sorted[insert_pos[is_curb]]
+                curb_mask[curb_points_k] = True
+                curb_mask[curb_points_k1] = True
+
+        t_elapsed = (time.time() - t0) * 1000.0
+        n_curbs = int(curb_mask.sum())
+
+        if self.config.verbose:
+            print(f"[Curb Detection] {t_elapsed:.1f} ms | {n_curbs} puntos bordillo detectados")
+
+        return curb_mask
+
     def stage2_complete(self, points: np.ndarray) -> Dict:
         """
         Stage 2 completo: ejecuta Stage 1 + delta-r.
@@ -850,6 +958,14 @@ class LidarPipelineSuite:
             obs_mask = np.zeros(N, dtype=bool)
             obs_mask[stage1_result['nonground_indices']] = True
             ground_mask = ~obs_mask
+
+            # Detección de bordillos (opcional)
+            curb_mask = np.zeros(N, dtype=bool)
+            if self.config.enable_curb_detection:
+                curb_mask = self.detect_curbs(points, ground_mask)
+                obs_mask |= curb_mask
+                ground_mask = ~obs_mask
+
             return {
                 **stage1_result,
                 'delta_r': np.zeros(N, dtype=np.float32),
@@ -857,6 +973,7 @@ class LidarPipelineSuite:
                 'obs_mask': obs_mask,
                 'ground_mask': ground_mask,
                 'void_mask': np.zeros(N, dtype=bool),
+                'curb_mask': curb_mask,
                 'timing_ms': stage1_result['timing_ms'],
                 'timing_total_ms': stage1_result['timing_ms'],
             }

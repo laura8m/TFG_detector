@@ -108,17 +108,17 @@ WR mejora de forma consistente en todos los rangos, con mayor impacto en **dista
 
 WR reduce el obstacle leak a un tercio: 12.3% → 4.3% (de 6.4M a 2.2M puntos obstaculo mal clasificados como ground).
 
-**Analisis de altura de puntos rescatados por WR** (1,271,400 puntos en seq 08):
+**Analisis de altura de puntos rescatados por WR** (1,773,056 puntos en seq 08, params 0.95/0.15/0.15):
 
 | Altura sobre suelo | Puntos | % | Interpretacion |
 |---------------------|--------|-----|----------------|
-| < 5 cm | 181,337 | 14.3% | Suelo mal clasificado |
-| 5 - 20 cm | 201,020 | 15.8% | Bordillos y bases de objetos |
-| 20 - 50 cm | 387,977 | 30.5% | Bases de paredes y muros bajos |
-| 50 cm - 1 m | 170,647 | 13.4% | Partes bajas de paredes y vehiculos |
-| 1 - 3 m | 114,312 | 9.0% | Partes medias de objetos |
+| < 5 cm | 313,981 | 17.7% | Suelo cercano mal clasificado |
+| 5 - 20 cm | 314,444 | 17.7% | Bordillos y bases de objetos |
+| 20 - 50 cm | 531,447 | 30.0% | Bases de paredes y muros bajos |
+| 50 cm - 1 m | 188,514 | 10.6% | Partes bajas de paredes y vehiculos |
+| 1 - 3 m | 91,853 | 5.2% | Partes medias de objetos |
 
-Altura mediana: 22.1 cm. El 93.6% de puntos rescatados esta por debajo de 1m, confirmando que WR corrige principalmente la clasificacion erronea de **bases de obstaculos** cercanas al plano del suelo.
+Altura mediana: 17.6 cm. El 60.2% de los puntos rescatados son **TPs** (obstaculos reales), con altura mediana de 24.8 cm. El 39.8% son FPs (ground real), con altura mediana de 9.3 cm. Los FPs se concentran por debajo de 10 cm, mientras que los TPs dominan a partir de 20 cm, confirmando que WR rescata principalmente **bases de obstaculos** cercanas al plano del suelo.
 
 ### Comparacion con Estado del Arte (val seq 08)
 

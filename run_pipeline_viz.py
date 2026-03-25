@@ -74,6 +74,7 @@ COLOR_OBSTACLE  = rgb_to_float(230, 50, 50)    # Rojo
 COLOR_VOID      = rgb_to_float(50, 100, 230)   # Azul
 COLOR_WALL      = rgb_to_float(230, 200, 50)   # Amarillo
 COLOR_UNCERTAIN = rgb_to_float(150, 150, 150)  # Gris
+COLOR_CURB      = rgb_to_float(0, 230, 230)    # Cyan
 # Colores por categoría SemanticKITTI para Ground Truth
 GT_LABEL_COLORS = {
     # Vehículos - tonos azul/cyan
@@ -221,6 +222,8 @@ class PipelineVizNode(Node):
         rgb[result['ground_mask']] = COLOR_GROUND
         rgb[result['obs_mask']] = COLOR_OBSTACLE
         rgb[result['void_mask']] = COLOR_VOID
+        if 'curb_mask' in result and np.any(result['curb_mask']):
+            rgb[result['curb_mask']] = COLOR_CURB
 
         return rgb
 
@@ -237,7 +240,13 @@ class PipelineVizNode(Node):
         self.get_logger().info(f"=== Pipeline Viz: seq {seq}, stages {stages} ===")
 
         # Inicializar pipeline
-        config = PipelineConfig(verbose=False, enable_delta_r=args.delta_r)
+        config = PipelineConfig(
+            verbose=False,
+            enable_delta_r=args.delta_r,
+            enable_curb_detection=args.curb,
+            curb_height_min=args.curb_min,
+            curb_height_max=args.curb_max,
+        )
         self.pipeline = LidarPipelineSuite(config)
 
         # Cargar poses
@@ -323,6 +332,9 @@ def main():
                         help='Stages a visualizar (default: 1 2)')
     parser.add_argument('--no-rviz', action='store_true', help='No lanzar RViz automáticamente')
     parser.add_argument('--delta_r', action='store_true', help='Activar delta-r conservador (muestra voids en azul)')
+    parser.add_argument('--curb', action='store_true', help='Activar detección de bordillos (cyan en Stage 2)')
+    parser.add_argument('--curb_min', type=float, default=0.08, help='Altura mínima bordillo (m)')
+    parser.add_argument('--curb_max', type=float, default=0.25, help='Altura máxima bordillo (m)')
 
     clean_args = [a for a in sys.argv[1:] if not a.startswith('--ros-args')]
     args = parser.parse_args(clean_args)
