@@ -953,19 +953,20 @@ class LidarPipelineSuite:
 
         N = len(points)
 
-        if not self.config.enable_delta_r:
-            # Sin delta-r: Stage 1 es la clasificación final
-            obs_mask = np.zeros(N, dtype=bool)
-            obs_mask[stage1_result['nonground_indices']] = True
+        # Máscara base de obstáculos desde Stage 1
+        obs_mask = np.zeros(N, dtype=bool)
+        obs_mask[stage1_result['nonground_indices']] = True
+        ground_mask = ~obs_mask
+
+        # Detección de bordillos (opcional, independiente de delta-r)
+        curb_mask = np.zeros(N, dtype=bool)
+        if self.config.enable_curb_detection:
+            curb_mask = self.detect_curbs(points, ground_mask)
+            obs_mask |= curb_mask
             ground_mask = ~obs_mask
 
-            # Detección de bordillos (opcional)
-            curb_mask = np.zeros(N, dtype=bool)
-            if self.config.enable_curb_detection:
-                curb_mask = self.detect_curbs(points, ground_mask)
-                obs_mask |= curb_mask
-                ground_mask = ~obs_mask
-
+        if not self.config.enable_delta_r:
+            # Sin delta-r: Stage 1 + bordillos es la clasificación final
             return {
                 **stage1_result,
                 'delta_r': np.zeros(N, dtype=np.float32),
@@ -987,10 +988,15 @@ class LidarPipelineSuite:
             nonground_indices=stage1_result['nonground_indices'],
         )
 
+        # Combinar delta-r con bordillos
+        stage2_result['obs_mask'] |= curb_mask
+        stage2_result['ground_mask'] = ~stage2_result['obs_mask']
+        stage2_result['curb_mask'] = curb_mask
+
         # Combinar resultados
         return {
-            **stage1_result,  # ground_indices, rejected_walls, timing_ms (Stage 1)
-            **stage2_result,  # delta_r, likelihood, obs_mask, void_mask, timing_ms (Stage 2)
+            **stage1_result,
+            **stage2_result,
             'timing_total_ms': stage1_result['timing_ms'] + stage2_result['timing_ms']
         }
 
