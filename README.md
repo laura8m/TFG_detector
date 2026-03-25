@@ -108,6 +108,18 @@ WR mejora de forma consistente en todos los rangos, con mayor impacto en **dista
 
 WR reduce el obstacle leak a un tercio: 12.3% → 4.3% (de 6.4M a 2.2M puntos obstaculo mal clasificados como ground).
 
+**Analisis de altura de puntos rescatados por WR** (1,271,400 puntos en seq 08):
+
+| Altura sobre suelo | Puntos | % | Interpretacion |
+|---------------------|--------|-----|----------------|
+| < 5 cm | 181,337 | 14.3% | Suelo mal clasificado |
+| 5 - 20 cm | 201,020 | 15.8% | Bordillos y bases de objetos |
+| 20 - 50 cm | 387,977 | 30.5% | Bases de paredes y muros bajos |
+| 50 cm - 1 m | 170,647 | 13.4% | Partes bajas de paredes y vehiculos |
+| 1 - 3 m | 114,312 | 9.0% | Partes medias de objetos |
+
+Altura mediana: 22.1 cm. El 93.6% de puntos rescatados esta por debajo de 1m, confirmando que WR corrige principalmente la clasificacion erronea de **bases de obstaculos** cercanas al plano del suelo.
+
 ### Comparacion con Estado del Arte (val seq 08)
 
 | Metodo | F1 | IoU | P | R | ms/frame | GPU | Entrenamiento |
