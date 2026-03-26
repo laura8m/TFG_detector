@@ -47,10 +47,7 @@ from data_paths import get_sequence_info, get_scan_file, get_label_file
 # ========================================
 
 def load_scan(scan_id, seq, curb_labels=False):
-    if curb_labels:
-        curb_bin = Path(os.path.dirname(os.path.abspath(__file__))) / '3d_curb_labels' / seq / 'velodyne' / f'{scan_id:06d}.bin'
-        if curb_bin.exists():
-            return np.fromfile(str(curb_bin), dtype=np.float32).reshape(-1, 4)[:, :3]
+    """Siempre carga bin completo de SemanticKITTI. curb_labels ya no afecta al bin."""
     scan_file = get_scan_file(seq, scan_id)
     points = np.fromfile(scan_file, dtype=np.float32).reshape(-1, 4)[:, :3]
     return points
@@ -230,8 +227,8 @@ class PipelineVizNode(Node):
 
     def publish_curb_gt(self, scan_id, seq, points, obs_mask):
         """Publica bordillos GT: cyan=detectado, magenta=perdido."""
-        # Buscar labels de 3D-Curb (tienen label 3 = curb)
-        curb_label_file = Path(os.path.dirname(os.path.abspath(__file__))) / '3d_curb_labels' / seq / 'labels' / f'{scan_id:06d}.label'
+        # Buscar labels con curb=3 (mapeados o originales)
+        curb_label_file = get_label_file(seq, scan_id, use_curb=True)
         if curb_label_file.exists():
             labels = np.fromfile(str(curb_label_file), dtype=np.uint32) & 0xFFFF
         else:
@@ -462,8 +459,8 @@ def main():
     parser.add_argument('--no-rviz', action='store_true', help='No lanzar RViz automáticamente')
     parser.add_argument('--delta_r', action='store_true', help='Activar delta-r conservador (muestra voids en azul)')
     parser.add_argument('--curb', action='store_true', help='Activar detección de bordillos (cyan en Stage 2)')
-    parser.add_argument('--curb_min', type=float, default=0.08, help='Altura mínima bordillo (m)')
-    parser.add_argument('--curb_max', type=float, default=0.25, help='Altura máxima bordillo (m)')
+    parser.add_argument('--curb_min', type=float, default=0.05, help='Altura mínima bordillo (m)')
+    parser.add_argument('--curb_max', type=float, default=0.30, help='Altura máxima bordillo (m)')
     parser.add_argument('--curb_labels', action='store_true',
                         help='Usar datos de 3D-Curb (velodyne + labels de 3d_curb_labels/)')
 

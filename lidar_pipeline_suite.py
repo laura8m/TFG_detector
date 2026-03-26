@@ -58,22 +58,23 @@ class PipelineConfig:
     # Bandera de ablation: ¿Activar rechazo de paredes?
     enable_hybrid_wall_rejection: bool = True
 
-    wall_rejection_slope: float = 0.95  # Umbral nz (normal vertical) — optimizado grid search (th_dist=0.125)
-    # Si abs(n[2]) < 0.95 → plano inclinado → sospecha de pared
+    wall_rejection_slope: float = 1.0  # Umbral nz (normal vertical) — optimizado grid search (con curb=3)
+    # Si abs(n[2]) < 1.0 → plano inclinado → sospecha de pared
 
-    wall_height_diff_threshold: float = 0.15  # Delta-Z local (15cm) — optimizado grid search (th_dist=0.125)
+    wall_height_diff_threshold: float = 0.15  # Delta-Z local (15cm) — optimizado grid search (con curb=3)
     # Si variación de altura en vecindad > 15cm → confirmada como pared
 
-    wall_kdtree_radius: float = 0.15  # Radio de vecindad local (m) — optimizado grid search (th_dist=0.125)
+    wall_kdtree_radius: float = 0.2  # Radio de vecindad local (m) — optimizado grid search (con curb=3)
 
     # ========================================
     # DETECCIÓN DE BORDILLOS (Inter-Ring Height Discontinuity)
     # ========================================
 
-    enable_curb_detection: bool = False  # Desactivado por defecto (empeora SemanticKITTI)
-    curb_height_min: float = 0.08  # Altura mínima del bordillo (m) — configurable por vehículo
-    curb_height_max: float = 0.25  # Altura máxima (>25cm = pared, ya detectada por WR)
-    curb_min_consecutive: int = 3  # Puntos consecutivos mínimos para confirmar bordillo
+    enable_curb_detection: bool = False  # Activar para detectar bordillos (trade-off: CurbRecall↑, F1↓)
+    curb_height_min: float = 0.05  # Altura mínima del bordillo (m) — optimizado grid search 3D-Curb
+    curb_height_max: float = 0.30  # Altura máxima (>30cm = pared, ya detectada por WR)
+    curb_min_consecutive: int = 2  # Puntos mínimos para confirmar bordillo — optimizado grid search
+    curb_ring_gap: int = 3  # Salto entre rings (3 = mejor balance CurbRecall/F1) — optimizado grid search
     n_rings: int = 64  # Número de rings del LiDAR (Velodyne HDL-64E)
     fov_up_deg: float = 2.0  # FOV superior (grados)
     fov_down_deg: float = -24.33  # FOV inferior (grados)
@@ -880,16 +881,18 @@ class LidarPipelineSuite:
         # 2. Calcular azimut
         azimuth = np.arctan2(y, x)  # [-pi, pi]
 
-        # 3. Para cada par de rings consecutivos, emparejar por azimut
+        # 3. Para cada par de rings con gap configurable, emparejar por azimut
         ground_idx = np.where(ground_mask)[0]
         ground_rings = ring_id[ground_idx]
         ground_az = azimuth[ground_idx]
         ground_z = z[ground_idx]
 
-        for k in range(cfg.n_rings - 1):
-            # Puntos ground en ring k y k+1
+        gap = cfg.curb_ring_gap  # 1=adyacentes, 2-3=multi-ring (captura bordillos repartidos)
+
+        for k in range(cfg.n_rings - gap):
+            # Puntos ground en ring k y ring k+gap
             mask_k = ground_rings == k
-            mask_k1 = ground_rings == (k + 1)
+            mask_k1 = ground_rings == (k + gap)
 
             idx_k = ground_idx[mask_k]
             idx_k1 = ground_idx[mask_k1]
@@ -902,13 +905,13 @@ class LidarPipelineSuite:
             z_k = ground_z[mask_k]
             z_k1 = ground_z[mask_k1]
 
-            # Ordenar ring k+1 por azimut para búsqueda eficiente
+            # Ordenar ring k+gap por azimut para búsqueda eficiente
             sort_k1 = np.argsort(az_k1)
             az_k1_sorted = az_k1[sort_k1]
             z_k1_sorted = z_k1[sort_k1]
             idx_k1_sorted = idx_k1[sort_k1]
 
-            # Para cada punto en ring k, encontrar el vecino más cercano en azimut en ring k+1
+            # Para cada punto en ring k, encontrar el vecino más cercano en azimut en ring k+gap
             insert_pos = np.searchsorted(az_k1_sorted, az_k)
             insert_pos = np.clip(insert_pos, 0, len(az_k1_sorted) - 1)
 
@@ -920,7 +923,6 @@ class LidarPipelineSuite:
 
             # Verificar coherencia: al menos curb_min_consecutive puntos seguidos
             if np.sum(is_curb) >= cfg.curb_min_consecutive:
-                # Marcar puntos del ring superior (el que está en la acera)
                 curb_points_k = idx_k[is_curb]
                 curb_points_k1 = idx_k1_sorted[insert_pos[is_curb]]
                 curb_mask[curb_points_k] = True
