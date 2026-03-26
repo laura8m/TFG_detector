@@ -46,7 +46,11 @@ from data_paths import get_sequence_info, get_scan_file, get_label_file
 # DATOS KITTI
 # ========================================
 
-def load_scan(scan_id, seq):
+def load_scan(scan_id, seq, curb_labels=False):
+    if curb_labels:
+        curb_bin = Path(os.path.dirname(os.path.abspath(__file__))) / '3d_curb_labels' / seq / 'velodyne' / f'{scan_id:06d}.bin'
+        if curb_bin.exists():
+            return np.fromfile(str(curb_bin), dtype=np.float32).reshape(-1, 4)[:, :3]
     scan_file = get_scan_file(seq, scan_id)
     points = np.fromfile(scan_file, dtype=np.float32).reshape(-1, 4)[:, :3]
     return points
@@ -75,8 +79,31 @@ COLOR_VOID      = rgb_to_float(50, 100, 230)   # Azul
 COLOR_WALL      = rgb_to_float(230, 200, 50)   # Amarillo
 COLOR_UNCERTAIN = rgb_to_float(150, 150, 150)  # Gris
 COLOR_CURB      = rgb_to_float(0, 230, 230)    # Cyan
+COLOR_VOID_NEW  = rgb_to_float(255, 140, 0)    # Naranja (hoyos)
+
+# Paleta de colores para clusters DBSCAN
+CLUSTER_COLORS = [
+    rgb_to_float(230, 25, 75),    # Rojo
+    rgb_to_float(60, 180, 75),    # Verde
+    rgb_to_float(255, 225, 25),   # Amarillo
+    rgb_to_float(0, 130, 200),    # Azul
+    rgb_to_float(245, 130, 48),   # Naranja
+    rgb_to_float(145, 30, 180),   # Púrpura
+    rgb_to_float(70, 240, 240),   # Cyan
+    rgb_to_float(240, 50, 230),   # Magenta
+    rgb_to_float(210, 245, 60),   # Lima
+    rgb_to_float(250, 190, 212),  # Rosa
+    rgb_to_float(0, 128, 128),    # Teal
+    rgb_to_float(220, 190, 255),  # Lavanda
+    rgb_to_float(170, 110, 40),   # Marrón
+    rgb_to_float(128, 0, 0),      # Granate
+    rgb_to_float(0, 0, 128),      # Navy
+    rgb_to_float(128, 128, 0),    # Oliva
+]
 # Colores por categoría SemanticKITTI para Ground Truth
 GT_LABEL_COLORS = {
+    # Bordillo (3D-Curb)
+    3: rgb_to_float(0, 255, 255),      # curb (cyan)
     # Vehículos - tonos azul/cyan
     10: rgb_to_float(0, 0, 230),      # car (azul)
     11: rgb_to_float(0, 0, 180),      # bicycle (azul oscuro)
@@ -130,9 +157,12 @@ class PipelineVizNode(Node):
         self.args = args
 
         # Publishers por stage
+        self.pub_vanilla = self.create_publisher(PointCloud2, '/patchwork_vanilla_cloud', 10)
         self.pub_stage1 = self.create_publisher(PointCloud2, '/stage1_cloud', 10)
         self.pub_stage2 = self.create_publisher(PointCloud2, '/stage2_cloud', 10)
+        self.pub_clusters = self.create_publisher(PointCloud2, '/cluster_cloud', 10)
         self.pub_gt     = self.create_publisher(PointCloud2, '/gt_cloud', 10)
+        self.pub_curb_gt = self.create_publisher(PointCloud2, '/curb_gt_cloud', 10)
 
         # Timer para ejecutar una vez tras inicializar
         self.timer = self.create_timer(1.0, self.run_pipeline)
@@ -170,8 +200,15 @@ class PipelineVizNode(Node):
         return msg
 
     def publish_gt(self, scan_id, seq, points):
-        """Publica ground truth de SemanticKITTI coloreado por etiqueta."""
-        labels = load_gt_labels(scan_id, seq)
+        """Publica ground truth coloreado por etiqueta."""
+        if self.args.curb_labels:
+            curb_label_file = Path(os.path.dirname(os.path.abspath(__file__))) / '3d_curb_labels' / seq / 'labels' / f'{scan_id:06d}.label'
+            if curb_label_file.exists():
+                labels = np.fromfile(str(curb_label_file), dtype=np.uint32) & 0xFFFF
+            else:
+                labels = load_gt_labels(scan_id, seq)
+        else:
+            labels = load_gt_labels(scan_id, seq)
         if labels is None:
             self.get_logger().warn("No GT labels found")
             return
@@ -190,6 +227,51 @@ class PipelineVizNode(Node):
             msg = self.create_rgb_cloud(gt_points, rgb)
             self.pub_gt.publish(msg)
             self.get_logger().info(f"  GT: {len(gt_points)} obstacle points")
+
+    def publish_curb_gt(self, scan_id, seq, points, obs_mask):
+        """Publica bordillos GT: cyan=detectado, magenta=perdido."""
+        # Buscar labels de 3D-Curb (tienen label 3 = curb)
+        curb_label_file = Path(os.path.dirname(os.path.abspath(__file__))) / '3d_curb_labels' / seq / 'labels' / f'{scan_id:06d}.label'
+        if curb_label_file.exists():
+            labels = np.fromfile(str(curb_label_file), dtype=np.uint32) & 0xFFFF
+        else:
+            # Fallback a labels normales
+            labels = load_gt_labels(scan_id, seq)
+        if labels is None:
+            return
+        N = min(len(points), len(labels))
+        curb_mask = labels[:N] == 3  # curb label
+        if not np.any(curb_mask):
+            return
+
+        curb_points = points[:N][curb_mask]
+        curb_detected = obs_mask[:N][curb_mask]
+
+        rgb = np.full(len(curb_points), rgb_to_float(255, 0, 255), dtype=np.float32)  # Magenta = perdido
+        rgb[curb_detected] = rgb_to_float(0, 255, 255)  # Cyan = detectado
+
+        self.pub_curb_gt.publish(self.create_rgb_cloud(curb_points, rgb))
+        n_det = int(curb_detected.sum())
+        n_tot = len(curb_points)
+        self.get_logger().info(f"  Curb GT: {n_det}/{n_tot} detectados ({100*n_det/n_tot:.1f}%)")
+
+    def colorize_vanilla(self, points):
+        """PW++ vanilla: solo ground/non-ground sin WR."""
+        N = len(points)
+        rgb = np.full(N, COLOR_UNCERTAIN, dtype=np.float32)
+
+        self.pipeline.patchwork.estimateGround(points)
+        ground_idx = np.array(self.pipeline.patchwork.getGroundIndices())
+
+        ground_mask = np.zeros(N, dtype=bool)
+        if len(ground_idx) > 0:
+            valid = ground_idx[ground_idx < N]
+            ground_mask[valid] = True
+
+        rgb[ground_mask] = COLOR_GROUND
+        rgb[~ground_mask] = COLOR_OBSTACLE
+
+        return rgb
 
     def colorize_stage1(self, points, result):
         """Stage 1: suelo vs no-suelo + paredes rechazadas."""
@@ -227,6 +309,30 @@ class PipelineVizNode(Node):
 
         return rgb
 
+    def colorize_clusters(self, points, result):
+        """Stage 3: cada cluster DBSCAN con un color diferente. Ground en verde, ruido en gris."""
+        N = len(points)
+        rgb = np.full(N, COLOR_GROUND, dtype=np.float32)
+
+        cluster_labels = result['cluster_labels']
+        obs_mask = result['obs_mask']
+
+        # Puntos obstáculo sin cluster (ruido DBSCAN) → gris
+        noise_mask = obs_mask & (cluster_labels == -1)
+        rgb[noise_mask] = COLOR_UNCERTAIN
+
+        # Cada cluster con un color de la paleta
+        valid_labels = cluster_labels[cluster_labels >= 0]
+        if len(valid_labels) > 0:
+            unique_clusters = np.unique(valid_labels)
+            n_colors = len(CLUSTER_COLORS)
+            for cid in unique_clusters:
+                mask = cluster_labels == cid
+                color = CLUSTER_COLORS[int(cid) % n_colors]
+                rgb[mask] = color
+
+        return rgb
+
     def run_pipeline(self):
         if self.done:
             return
@@ -258,15 +364,19 @@ class PipelineVizNode(Node):
         # ----------------------------------------------------------------
         # Procesar el frame final a través del pipeline
         # ----------------------------------------------------------------
-        points = load_scan(scan_final, seq)
+        points = load_scan(scan_final, seq, curb_labels=args.curb_labels)
 
-        # Stage 1+2 (pipeline óptimo: PW++ + WR, sin DBSCAN)
-        result_s2 = self.pipeline.stage2_complete(points)
-
-        # Stage 1 info viene dentro de result_s2
-        result_s1 = result_s2
+        # Pipeline completo: Stage 1+2+3
+        result_s3 = self.pipeline.stage3_complete(points)
+        result_s2 = self.pipeline.last_stage2_result
+        result_s1 = result_s2  # Stage 1 info viene dentro de result_s2
 
         self.get_logger().info(f"\n  Publicando resultados del frame {scan_final}:")
+
+        if 0 in stages:
+            rgb0 = self.colorize_vanilla(points)
+            self.pub_vanilla.publish(self.create_rgb_cloud(points, rgb0))
+            self.get_logger().info(f"    PW++ vanilla publicado")
 
         if 1 in stages:
             rgb1 = self.colorize_stage1(points, result_s1)
@@ -281,20 +391,32 @@ class PipelineVizNode(Node):
             n_obs = result_s2['obs_mask'].sum()
             n_gnd = result_s2['ground_mask'].sum()
             n_void = result_s2.get('void_mask', np.zeros(0)).sum()
-            n_unc = result_s2.get('uncertain_mask', np.zeros(0)).sum()
             self.get_logger().info(
                 f"    Stage 2: obs={n_obs}, ground={n_gnd}, void={n_void}, "
-                f"uncertain={n_unc}, total={len(points)}"
+                f"total={len(points)}"
+            )
+
+        if 3 in stages:
+            rgb3 = self.colorize_clusters(points, result_s3)
+            self.pub_clusters.publish(self.create_rgb_cloud(points, rgb3))
+            n_clusters = result_s3.get('n_clusters', 0)
+            n_removed = result_s3.get('n_cluster_total_removed', 0)
+            self.get_logger().info(
+                f"    Stage 3: {n_clusters} clusters, {n_removed} puntos eliminados"
             )
 
         # Guardar snapshots por stage para republish
         self._snapshots = {
+            'vanilla_rgb': rgb0 if 0 in stages else None,
             's1': result_s1,
             's2': result_s2,
+            's3': result_s3,
         }
 
         # Ground truth
         self.publish_gt(scan_final, seq, points)
+        # Bordillos GT (cyan=detectado, magenta=perdido)
+        self.publish_curb_gt(scan_final, seq, points, result_s3['obs_mask'])
 
         self.get_logger().info("\n=== Publicado. Mantén RViz abierto. Ctrl+C para salir. ===")
         self.get_logger().info("  Topics: /stage1_cloud /stage2_cloud /gt_cloud")
@@ -311,13 +433,20 @@ class PipelineVizNode(Node):
         snaps = self._snapshots
         stages = self._stages
 
+        if 0 in stages and snaps.get('vanilla_rgb') is not None:
+            self.pub_vanilla.publish(self.create_rgb_cloud(points, snaps['vanilla_rgb']))
         if 1 in stages and snaps.get('s1') is not None:
             rgb1 = self.colorize_stage1(points, snaps['s1'])
             self.pub_stage1.publish(self.create_rgb_cloud(points, rgb1))
         if 2 in stages and snaps.get('s2') is not None:
             rgb2 = self.colorize_stage2(points, snaps['s2'])
             self.pub_stage2.publish(self.create_rgb_cloud(points, rgb2))
+        if 3 in stages and snaps.get('s3') is not None:
+            rgb3 = self.colorize_clusters(points, snaps['s3'])
+            self.pub_clusters.publish(self.create_rgb_cloud(points, rgb3))
         self.publish_gt(self.args.scan_end, self.args.seq, points)
+        if snaps.get('s3') is not None:
+            self.publish_curb_gt(self.args.scan_end, self.args.seq, points, snaps['s3']['obs_mask'])
 
 
 def main():
@@ -328,13 +457,15 @@ def main():
     parser.add_argument('--scan', type=int, default=None, help='Frame único (sobrescribe scan_start/end)')
     parser.add_argument('--scan_start', type=int, default=0, help='Primer frame')
     parser.add_argument('--scan_end', type=int, default=10, help='Último frame')
-    parser.add_argument('--stages', type=int, nargs='+', default=[1, 2],
+    parser.add_argument('--stages', type=int, nargs='+', default=[0, 1, 2, 3],
                         help='Stages a visualizar (default: 1 2)')
     parser.add_argument('--no-rviz', action='store_true', help='No lanzar RViz automáticamente')
     parser.add_argument('--delta_r', action='store_true', help='Activar delta-r conservador (muestra voids en azul)')
     parser.add_argument('--curb', action='store_true', help='Activar detección de bordillos (cyan en Stage 2)')
     parser.add_argument('--curb_min', type=float, default=0.08, help='Altura mínima bordillo (m)')
     parser.add_argument('--curb_max', type=float, default=0.25, help='Altura máxima bordillo (m)')
+    parser.add_argument('--curb_labels', action='store_true',
+                        help='Usar datos de 3D-Curb (velodyne + labels de 3d_curb_labels/)')
 
     clean_args = [a for a in sys.argv[1:] if not a.startswith('--ros-args')]
     args = parser.parse_args(clean_args)

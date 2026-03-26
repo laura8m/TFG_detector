@@ -39,7 +39,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lidar_pipeline_suite import LidarPipelineSuite, PipelineConfig
 from data_paths import (get_scan_file, get_label_file, get_velodyne_dir,
-                        get_labels_dir, VELODYNE_ROOT, LABELS_ROOT)
+                        get_labels_dir, VELODYNE_ROOT, LABELS_ROOT,
+                        OBSTACLE_LABELS, IGNORE_LABELS)
 
 # Split oficial SemanticKITTI
 SEMANTICKITTI_TRAIN = ['00', '01', '02', '03', '04', '05', '06', '07', '09', '10']
@@ -90,19 +91,6 @@ def load_kitti_scan(scan_id: int, seq: str):
     else:
         semantic_labels = np.zeros(len(points), dtype=np.uint32)
     return points, semantic_labels
-
-
-OBSTACLE_LABELS = np.array([
-    10, 11, 13, 15, 16, 18, 20,
-    30, 31, 32,
-    50, 51,
-    70, 71,
-    80, 81,
-    252, 253, 254, 255, 256, 257, 258, 259
-], dtype=np.uint32)
-
-# Labels ignorados en evaluación (learning_map → 0 en SemanticKITTI)
-IGNORE_LABELS = np.array([0, 1, 52, 99], dtype=np.uint32)
 
 
 def get_gt_obstacle_mask(semantic_labels):

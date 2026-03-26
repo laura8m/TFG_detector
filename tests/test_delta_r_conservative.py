@@ -19,22 +19,8 @@ import time
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lidar_pipeline_suite import LidarPipelineSuite, PipelineConfig
-from data_paths import get_sequence_info, get_scan_file, get_label_file
-
-# ========================================
-# ETIQUETAS SemanticKITTI (corregidas)
-# ========================================
-
-OBSTACLE_LABELS = np.array([
-    10, 11, 13, 15, 16, 18, 20,
-    30, 31, 32,
-    50, 51,
-    70, 71,
-    80, 81,
-    252, 253, 254, 255, 256, 257, 258, 259
-], dtype=np.uint32)
-
-IGNORE_LABELS = np.array([0, 1, 52, 99], dtype=np.uint32)
+from data_paths import (get_sequence_info, get_scan_file, get_label_file,
+                        OBSTACLE_LABELS, IGNORE_LABELS)
 
 
 def load_scan(scan_id, seq):

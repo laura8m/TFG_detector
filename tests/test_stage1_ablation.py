@@ -21,27 +21,8 @@ import time
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lidar_pipeline_suite import LidarPipelineSuite, PipelineConfig
-from data_paths import get_scan_file, get_label_file, get_sequence_info
-
-# ========================================
-# DATOS
-# ========================================
-
-# SemanticKITTI ground labels
-GROUND_LABELS = {40, 44, 48, 49, 60, 72}  # road, parking, sidewalk, other-ground, lane-marking, terrain
-
-# SemanticKITTI obstacle labels (NO 52/99 = ignored en learning_map)
-OBSTACLE_LABELS = {
-    10, 11, 13, 15, 16, 18, 20,       # vehicles
-    30, 31, 32,                         # persons
-    50, 51,                             # structures
-    70, 71,                             # vegetation
-    80, 81,                             # poles
-    252, 253, 254, 255, 256, 257, 258, 259  # moving objects
-}
-
-# Labels ignorados en evaluación (learning_map → 0 en SemanticKITTI)
-IGNORE_LABELS = {0, 1, 52, 99}
+from data_paths import (get_scan_file, get_label_file, get_sequence_info,
+                        OBSTACLE_LABELS, GROUND_LABELS, IGNORE_LABELS)
 
 
 def load_kitti_scan(scan_id, seq):

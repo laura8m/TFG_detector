@@ -17,7 +17,7 @@ import time
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lidar_pipeline_suite import LidarPipelineSuite, PipelineConfig
-from data_paths import get_sequence_info, get_scan_file, get_label_file
+from data_paths import get_sequence_info, get_scan_file, get_label_file, IGNORE_LABELS
 
 # ========================================
 # ETIQUETAS SemanticKITTI
@@ -46,8 +46,6 @@ OBSTACLE_CLASSES = {
 OBSTACLE_LABELS_ALL = set()
 for labels in OBSTACLE_CLASSES.values():
     OBSTACLE_LABELS_ALL.update(labels)
-
-IGNORE_LABELS = {0, 1, 52, 99}
 
 # Rangos de distancia (metros)
 DISTANCE_RANGES = [

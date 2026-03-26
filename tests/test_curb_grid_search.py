@@ -17,12 +17,7 @@ from itertools import product
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from lidar_pipeline_suite import LidarPipelineSuite, PipelineConfig
-
-OBSTACLE_LABELS = np.array([3, 10, 11, 13, 15, 16, 18, 20, 30, 31, 32,
-                            50, 51, 70, 71, 80, 81,
-                            252, 253, 254, 255, 256, 257, 258, 259], dtype=np.uint32)
-IGNORE_LABELS = np.array([0, 1, 52, 99], dtype=np.uint32)
-CURB_LABEL = 3
+from data_paths import OBSTACLE_LABELS, IGNORE_LABELS, CURB_LABEL
 
 TRAIN_SEQS = ['00', '01', '02', '03', '04', '05', '06', '07', '09', '10']
 VAL_SEQS = ['08']

@@ -19,7 +19,8 @@ import time
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lidar_pipeline_suite import LidarPipelineSuite, PipelineConfig
-from data_paths import get_sequence_info, get_scan_file, get_label_file
+from data_paths import (get_sequence_info, get_scan_file, get_label_file,
+                        OBSTACLE_LABELS, IGNORE_LABELS)
 
 # ========================================
 # UTILIDADES
@@ -52,31 +53,14 @@ def compute_metrics(gt_mask, pred_mask, valid_mask=None):
             'tp': int(tp), 'fp': int(fp), 'fn': int(fn)}
 
 
-IGNORE_LABELS = [0, 1, 52, 99]  # learning_map → 0 en SemanticKITTI
-
-
 def get_gt_obstacle_mask(semantic_labels):
     """SemanticKITTI obstacle labels (NO 72=terrain, NO 52/99=ignored, SI 252-259=moving)"""
-    obstacle_labels = [
-        10, 11, 13, 15, 16, 18, 20,  # Vehicles
-        30, 31, 32,                    # Persons
-        50, 51,                        # Structures (NO 52=other-structure)
-        70, 71,                        # Vegetation (NO 72=terrain)
-        80, 81,                        # Poles/signs
-        252, 253, 254, 255, 256, 257, 258, 259  # Moving objects
-    ]
-    mask = np.zeros(len(semantic_labels), dtype=bool)
-    for label in obstacle_labels:
-        mask |= (semantic_labels == label)
-    return mask
+    return np.isin(semantic_labels, OBSTACLE_LABELS)
 
 
 def get_valid_mask(semantic_labels):
     """Máscara de puntos válidos (excluye unlabeled, outlier, other-structure, other-object)"""
-    mask = np.ones(len(semantic_labels), dtype=bool)
-    for label in IGNORE_LABELS:
-        mask &= (semantic_labels != label)
-    return mask
+    return ~np.isin(semantic_labels, IGNORE_LABELS)
 
 
 # ========================================

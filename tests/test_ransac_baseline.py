@@ -15,20 +15,8 @@ import time
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from data_paths import get_velodyne_dir, get_labels_dir
+from data_paths import get_velodyne_dir, get_labels_dir, OBSTACLE_LABELS, IGNORE_LABELS
 from lidar_pipeline_suite import LidarPipelineSuite, PipelineConfig
-
-# === Labels SemanticKITTI ===
-OBSTACLE_LABELS = np.array([
-    10, 11, 13, 15, 16, 18, 20,
-    30, 31, 32,
-    50, 51,
-    70, 71,
-    80, 81,
-    252, 253, 254, 255, 256, 257, 258, 259
-], dtype=np.uint32)
-
-IGNORE_LABELS = np.array([0, 1, 52, 99], dtype=np.uint32)
 
 
 def ransac_ground_segmentation(points, n_iterations=100, distance_threshold=0.3,

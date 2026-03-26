@@ -13,22 +13,12 @@ Uso:
 """
 import argparse
 import os
+import sys
 import numpy as np
 from pathlib import Path
 
-# === Labels SemanticKITTI ===
-OBSTACLE_LABELS = np.array([
-    10, 11, 13, 15, 16, 18, 20,     # vehículos
-    30, 31, 32,                       # personas
-    50, 51,                           # estructuras
-    70, 71,                           # vegetación
-    80, 81,                           # troncos/postes
-    252, 253, 254, 255, 256, 257, 258, 259  # moving
-], dtype=np.uint32)
-
-GROUND_LABELS = np.array([40, 44, 48, 49, 60, 72], dtype=np.uint32)
-
-IGNORE_LABELS = np.array([0, 1, 52, 99], dtype=np.uint32)
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from data_paths import OBSTACLE_LABELS, GROUND_LABELS, IGNORE_LABELS
 
 # Mapping de learning_map para predicciones DL (clase → label original)
 # Cylinder3D predice clases 0-19, hay que mapearlas a labels originales

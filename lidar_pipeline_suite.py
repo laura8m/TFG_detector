@@ -58,13 +58,13 @@ class PipelineConfig:
     # Bandera de ablation: ¿Activar rechazo de paredes?
     enable_hybrid_wall_rejection: bool = True
 
-    wall_rejection_slope: float = 0.9  # Umbral nz (normal vertical) — optimizado grid search
-    # Si abs(n[2]) < 0.9 → plano inclinado → sospecha de pared
+    wall_rejection_slope: float = 0.95  # Umbral nz (normal vertical) — optimizado grid search (th_dist=0.125)
+    # Si abs(n[2]) < 0.95 → plano inclinado → sospecha de pared
 
-    wall_height_diff_threshold: float = 0.2  # Delta-Z local (20cm) — optimizado grid search
-    # Si variación de altura en vecindad > 20cm → confirmada como pared
+    wall_height_diff_threshold: float = 0.15  # Delta-Z local (15cm) — optimizado grid search (th_dist=0.125)
+    # Si variación de altura en vecindad > 15cm → confirmada como pared
 
-    wall_kdtree_radius: float = 0.3  # Radio de vecindad local (m) — optimizado grid search
+    wall_kdtree_radius: float = 0.15  # Radio de vecindad local (m) — optimizado grid search (th_dist=0.125)
 
     # ========================================
     # DETECCIÓN DE BORDILLOS (Inter-Ring Height Discontinuity)

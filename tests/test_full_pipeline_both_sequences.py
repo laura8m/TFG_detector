@@ -39,13 +39,10 @@ LABEL_NAMES = {
     258:'moving-truck', 259:'moving-other-vehicle',
 }
 
-GROUND_LABELS = {40, 44, 48, 49, 60, 72}
-OBSTACLE_LABELS = {10,11,13,15,16,18,20,30,31,32,50,51,70,71,80,81,
-                   252,253,254,255,256,257,258,259}
-IGNORE_LABELS = {0, 1, 52, 99}  # learning_map → 0 en SemanticKITTI
+from data_paths import (get_sequence_info, get_scan_file, get_label_file, get_velodyne_dir,
+                        get_labels_dir, get_poses_file,
+                        OBSTACLE_LABELS, GROUND_LABELS, IGNORE_LABELS)
 CRITICAL_LABELS = {10, 13, 15, 18, 20, 30, 31, 32, 252, 253, 254, 255, 257, 258, 259}
-
-from data_paths import get_sequence_info, get_scan_file, get_label_file, get_velodyne_dir, get_labels_dir, get_poses_file
 
 SEQ_DESCRIPTIONS = {
     '00': 'Urbana (edificios, coches, vegetacion, aceras)',

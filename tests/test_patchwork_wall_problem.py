@@ -19,7 +19,7 @@ import pypatchworkpp
 # ============================================================
 # Configuracion
 # ============================================================
-from data_paths import get_scan_file, get_label_file
+from data_paths import get_scan_file, get_label_file, OBSTACLE_LABELS, GROUND_LABELS
 SCAN_FILE = str(get_scan_file('04', 0))
 LABEL_FILE = str(get_label_file('04', 0))
 
@@ -59,21 +59,6 @@ LABEL_NAMES = {
     257: 'moving-bus',
     258: 'moving-truck',
     259: 'moving-other-vehicle',
-}
-
-# Labels que son GROUND real
-GROUND_LABELS = {40, 44, 48, 49, 60, 72}  # road, parking, sidewalk, other-ground, lane-marking, terrain
-
-# Labels que son OBSTACULOS reales (NO deberian ser ground)
-OBSTACLE_LABELS = {
-    10, 11, 13, 15, 16, 18,  # vehicles
-    20,                       # other-vehicle
-    30, 31, 32,               # person, bicyclist, motorcyclist
-    50, 51, 52,               # building, fence, other-structure
-    70, 71,                   # vegetation, trunk
-    80, 81,                   # pole, traffic-sign
-    99,                       # other-object
-    252, 253, 254, 255, 256, 257, 258, 259  # moving objects
 }
 
 # ============================================================
