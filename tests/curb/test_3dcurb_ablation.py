@@ -147,12 +147,13 @@ def main():
 
         pipeline = LidarPipelineSuite(config)
         total_tp, total_fp, total_fn = 0, 0, 0
-        total_curb_detected, total_curb_gt = 0, 0
+        total_curb_tp, total_curb_fp, total_curb_fn = 0, 0, 0
         total_time_ms = 0
 
         for i, (pts, gt_mask, valid_mask, curb_gt) in enumerate(frames):
             t0 = time.time()
 
+            curb_mask_pred = np.zeros(len(pts), dtype=bool)
             if config_name == 'PW++ vanilla':
                 pipeline.patchwork.estimateGround(pts)
                 ground_idx = set(pipeline.patchwork.getGroundIndices())
@@ -160,21 +161,28 @@ def main():
             else:
                 result = pipeline.stage2_complete(pts)
                 pred_mask = result['obs_mask']
+                if 'curb_mask' in result:
+                    curb_mask_pred = result['curb_mask']
 
             t_ms = (time.time() - t0) * 1000.0
             total_time_ms += t_ms
 
-            # Métricas con valid_mask
+            # Métricas globales con valid_mask
             gt_v = gt_mask & valid_mask
             pred_v = pred_mask & valid_mask
             total_tp += int(np.sum(gt_v & pred_v))
             total_fp += int(np.sum(~gt_v & pred_v))
             total_fn += int(np.sum(gt_v & ~pred_v))
 
-            # Curb recall
+            # Métricas de curb (IoU, P, R)
             curb_valid = curb_gt & valid_mask
-            total_curb_gt += int(np.sum(curb_valid))
-            total_curb_detected += int(np.sum(curb_valid & pred_v))
+            # TP: puntos que son curb GT y detectados como obstáculo
+            total_curb_tp += int(np.sum(curb_valid & pred_v))
+            # FN: puntos que son curb GT y NO detectados
+            total_curb_fn += int(np.sum(curb_valid & ~pred_v))
+            # FP: puntos predichos como curb (curb_mask) que NO son curb GT
+            if np.any(curb_mask_pred):
+                total_curb_fp += int(np.sum(curb_mask_pred & valid_mask & ~curb_gt))
 
             if (i + 1) % max(1, len(frames) // 10) == 0:
                 print(f"\r  [{i+1}/{len(frames)}] {100*(i+1)/len(frames):.0f}%", end="", flush=True)
@@ -182,21 +190,29 @@ def main():
         print(f"\r  {len(frames)} frames en {total_time_ms/1000:.1f}s "
               f"({total_time_ms/len(frames):.1f} ms/frame)")
 
+        # Métricas globales
         p = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0.0
         r = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0.0
         f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
         iou = total_tp / (total_tp + total_fp + total_fn) if (total_tp + total_fp + total_fn) > 0 else 0.0
-        curb_recall = total_curb_detected / total_curb_gt if total_curb_gt > 0 else 0.0
+
+        # Métricas de curb
+        curb_p = total_curb_tp / (total_curb_tp + total_curb_fp) if (total_curb_tp + total_curb_fp) > 0 else 0.0
+        curb_r = total_curb_tp / (total_curb_tp + total_curb_fn) if (total_curb_tp + total_curb_fn) > 0 else 0.0
+        curb_f1 = 2 * curb_p * curb_r / (curb_p + curb_r) if (curb_p + curb_r) > 0 else 0.0
+        curb_iou = total_curb_tp / (total_curb_tp + total_curb_fp + total_curb_fn) if (total_curb_tp + total_curb_fp + total_curb_fn) > 0 else 0.0
 
         results[config_name] = {
             'f1': f1, 'iou': iou, 'precision': p, 'recall': r,
-            'curb_recall': curb_recall,
-            'curb_detected': total_curb_detected, 'curb_total': total_curb_gt,
+            'curb_recall': curb_r, 'curb_precision': curb_p,
+            'curb_f1': curb_f1, 'curb_iou': curb_iou,
+            'curb_tp': total_curb_tp, 'curb_fp': total_curb_fp, 'curb_fn': total_curb_fn,
             'ms_per_frame': total_time_ms / len(frames),
         }
 
         print(f"  F1={100*f1:.2f}%  IoU={100*iou:.2f}%  P={100*p:.2f}%  R={100*r:.2f}%  "
-              f"Curb={100*curb_recall:.1f}%  ({total_time_ms/len(frames):.1f} ms/frame)")
+              f"CurbR={100*curb_r:.1f}%  CurbIoU={100*curb_iou:.1f}%  "
+              f"({total_time_ms/len(frames):.1f} ms/frame)")
 
     # Tabla resumen
     print(f"\n{'='*100}")
@@ -204,9 +220,9 @@ def main():
     print(f"Val: {list(all_scan_ids.keys())} | {total_frames} frames | stride={args.stride}")
     print(f"{'='*100}")
 
-    print(f"\n{'Configuracion':<35} | {'F1':>7} {'IoU':>7} {'P':>7} {'R':>7} "
-          f"{'Curb R':>7} {'ms/fr':>7}")
-    print("-" * 100)
+    # Tabla global
+    print(f"\n{'Configuracion':<35} | {'F1':>7} {'IoU':>7} {'P':>7} {'R':>7} {'ms/fr':>7}")
+    print("-" * 90)
 
     prev_f1 = None
     config_names = list(results.keys())
@@ -218,13 +234,25 @@ def main():
             delta = f" ({100*df1:+.2f}%)"
         print(f"{name:<35} | {100*r['f1']:>6.2f}% {100*r['iou']:>6.2f}% "
               f"{100*r['precision']:>6.2f}% {100*r['recall']:>6.2f}% "
-              f"{100*r['curb_recall']:>6.1f}% {r['ms_per_frame']:>6.1f}{delta}")
+              f"{r['ms_per_frame']:>6.1f}{delta}")
         prev_f1 = r['f1']
+
+    # Tabla de curb
+    print(f"\n{'='*100}")
+    print("MÉTRICAS DE BORDILLOS (curb label=3)")
+    print(f"{'='*100}")
+    print(f"\n{'Configuracion':<35} | {'Curb P':>7} {'Curb R':>7} {'Curb F1':>8} {'Curb IoU':>9}")
+    print("-" * 80)
+    for name in config_names:
+        r = results[name]
+        print(f"{name:<35} | {100*r['curb_precision']:>6.1f}% {100*r['curb_recall']:>6.1f}% "
+              f"{100*r['curb_f1']:>7.2f}% {100*r['curb_iou']:>8.2f}%")
 
     first = config_names[0]
     last = config_names[-1]
     print(f"\nMejora total: {100*(results[last]['f1'] - results[first]['f1']):+.2f}% F1")
     print(f"Curb recall: {100*results[first]['curb_recall']:.1f}% → {100*results[last]['curb_recall']:.1f}%")
+    print(f"Curb IoU: {100*results[first]['curb_iou']:.1f}% → {100*results[last]['curb_iou']:.1f}%")
 
 
 if __name__ == '__main__':
