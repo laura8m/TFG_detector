@@ -33,7 +33,7 @@ class PipelineConfig:
 
     Etapas:
     - Stage 1: Segmentación de suelo (Patchwork++) + rechazo de paredes
-    - Stage 2: Detección de anomalías delta-r
+    - Stage 2: Detección de bordillos (inter-ring height discontinuity)
     - Stage 3: Filtrado por clustering DBSCAN
     """
 
@@ -79,14 +79,7 @@ class PipelineConfig:
     fov_up_deg: float = 2.0  # FOV superior (grados)
     fov_down_deg: float = -24.33  # FOV inferior (grados)
 
-    # ========================================
-    # STAGE 2: Detección de anomalías delta-r
-    # ========================================
-
-    enable_delta_r: bool = False  # Delta-r desactivado: no mejora en SemanticKITTI (-0.03% F1)
-    threshold_obs: float = -0.8  # Obstáculo positivo (m) — optimizado grid search conservador
-    threshold_void: float = 1.5  # Void/depresión (m) — optimizado grid search conservador
-    delta_r_min_nz: float = 0.95  # nz mínimo para considerar bin fiable — optimizado grid search
+    wall_min_neighbors: int = 5  # Vecinos mínimos en KDTree para confirmar pared
 
     # ========================================
     # STAGE 3: Filtrado por clustering DBSCAN
@@ -114,17 +107,11 @@ class LidarPipelineSuite:
 
     Implementa un pipeline secuencial de 3 etapas:
       1. Segmentación de suelo (Patchwork++ + rechazo de paredes)
-      2. Detección de anomalías delta-r
+      2. Detección de bordillos (inter-ring height discontinuity)
       3. Filtrado por clustering DBSCAN (elimina ruido disperso)
 
     Cada etapa puede activarse/desactivarse mediante PipelineConfig para
     facilitar ablation studies.
-
-    Estado compartido entre etapas:
-    - self.local_planes: Planos locales por bin CZM para cálculo de delta-r
-    Nota: El filtro temporal Bayesiano (Dewan et al.) se eliminó tras ablation
-    study que demostró que no mejora resultados en KITTI (buen tiempo).
-    Ver lidar_pipeline_suite_with_bayes.py para la versión con Bayes.
     """
 
     def __init__(
@@ -146,8 +133,6 @@ class LidarPipelineSuite:
         self.data_path = Path(data_path) if data_path else None
         self.ros_node = ros_node
 
-        # === ESTADO COMPARTIDO ===
-        self.local_planes = {}  # Dict[(z,r,s)] -> (normal, d)
         # === INICIALIZAR SUBMÓDULOS ===
         self._init_patchwork()
         self.initialize_czm_params()
@@ -577,7 +562,7 @@ class LidarPipelineSuite:
                 delta_z_threshold=self.config.wall_height_diff_threshold,
                 use_percentiles=True,
                 kdtree_radius=self.config.wall_kdtree_radius,
-                min_neighbors=5
+                min_neighbors=self.config.wall_min_neighbors
             )
 
         if self.config.verbose:
@@ -714,130 +699,9 @@ class LidarPipelineSuite:
     # STAGE 2: DETECCIÓN DE ANOMALÍAS DELTA-R
     # ========================================
 
-    def compute_delta_r(
-        self,
-        points: np.ndarray,
-        ground_indices: np.ndarray,
-        n_per_point: np.ndarray,
-        d_per_point: np.ndarray,
-        nonground_indices: np.ndarray = None,
-    ) -> Dict:
-        """
-        Stage 2: Detección de anomalías delta-r.
-
-        Mide la desviación entre el rango medido y el rango esperado por el
-        plano local:
-            delta_r = r_medido - r_esperado
-
-        Donde r_esperado se calcula proyectando el rayo sobre el plano local:
-            r_esperado = -d / (n . dirección_rayo)
-
-        Clasificación:
-            delta_r < umbral_obs → Obstáculo positivo (más cerca que el plano)
-            delta_r > umbral_void → Void/depresión (más lejos que el plano)
-            Intermedio → Ground normal
-
-        Modo conservador (delta_r_conservative=True):
-            - Solo aplica delta-r en bins con nz >= delta_r_min_nz (plano fiable)
-            - Nunca reclasifica non-ground de Stage 1 como ground
-            - Solo permite ground→obstáculo o ground→void (rescate)
-
-        Args:
-            points: (N, 3) todos los puntos
-            ground_indices: (M,) índices de puntos ground
-            n_per_point: (N, 3) normales por punto
-            d_per_point: (N,) offsets del plano por punto
-            nonground_indices: (K,) índices nonground de Stage 1 (para modo conservador)
-
-        Returns:
-            Dict con:
-                - delta_r: (N,) desviación de rango
-                - likelihood: (N,) log-likelihood por punto
-                - obs_mask: (N,) máscara booleana de obstáculos
-                - void_mask: (N,) máscara booleana de voids
-                - ground_mask: (N,) máscara booleana de ground
-                - uncertain_mask: (N,) máscara de puntos inciertos
-                - timing_ms: tiempo de ejecución
-        """
-        t_start = time.time()
-
-        N = len(points)
-
-        # ========================================
-        # 1. CALCULAR r_medido y dirección del rayo
-        # ========================================
-        r_measured = np.linalg.norm(points, axis=1)
-
-        # ========================================
-        # 2. CALCULAR r_esperado y delta_r (fusionado, sin arrays intermedios)
-        # ========================================
-        # dot_prod = (point / |point|) . normal = (point . normal) / |point|
-        dot_prod = np.einsum('ij,ij->i', points, n_per_point) / np.maximum(r_measured, 1e-6)
-
-        # r_expected = -d / dot_prod (solo donde dot_prod < 0)
-        # delta_r = r_measured - r_expected = r_measured + d / dot_prod
-        safe_dot = np.where(dot_prod < -1e-3, dot_prod, -1e-3)
-        delta_r = np.clip(r_measured + d_per_point / safe_dot, -20.0, 10.0)
-
-        # ========================================
-        # 3. CLASIFICACIÓN
-        # ========================================
-        threshold_obs = self.config.threshold_obs
-        threshold_void = self.config.threshold_void
-
-        # --- MODO CONSERVADOR (único modo) ---
-        # Empezar con la clasificación de Stage 1 (non-ground = obstáculo)
-        obs_mask_final = np.zeros(N, dtype=bool)
-        obs_mask_final[nonground_indices] = True  # Preservar Stage 1
-
-        # Máscara de bins fiables: nz >= delta_r_min_nz
-        nz_per_point = np.abs(n_per_point[:, 2])
-        reliable_bin = nz_per_point >= self.config.delta_r_min_nz
-
-        # Solo en puntos ground + bin fiable: rescatar como obstáculo o void
-        ground_mask_s1 = np.ones(N, dtype=bool)
-        ground_mask_s1[nonground_indices] = False
-        rescatable = ground_mask_s1 & reliable_bin
-
-        # Rescate: ground→obstáculo si delta-r indica anomalía
-        rescued_obs = rescatable & (delta_r < threshold_obs)
-        rescued_void = rescatable & (delta_r > threshold_void)
-        obs_mask_final |= rescued_obs | rescued_void
-
-        void_mask_final = rescued_void.copy()
-
-        n_rescued = int(rescued_obs.sum() + rescued_void.sum())
-        if self.config.verbose:
-            n_reliable = int(reliable_bin.sum())
-            print(f"  [Delta-r conservador] Bins fiables: {n_reliable}/{N} pts | Rescatados: {n_rescued}")
-
-        # Forzar paredes rechazadas como obstáculos
-        if hasattr(self, 'rejected_wall_indices') and len(self.rejected_wall_indices) > 0:
-            valid_idx = self.rejected_wall_indices[self.rejected_wall_indices < N]
-            obs_mask_final[valid_idx] = True
-
-        ground_mask_final = ~obs_mask_final
-
-        # Likelihood (solo para compatibilidad, sin coste extra)
-        likelihood_final = np.where(obs_mask_final, 2.0,
-                           np.where(void_mask_final, 1.5, -2.0)).astype(np.float32)
-
-        t_end = time.time()
-        timing_ms = (t_end - t_start) * 1000.0
-
-        if self.config.verbose:
-            print(f"[Stage 2 Completo] {timing_ms:.1f} ms")
-            print(f"  Obstáculos: {obs_mask_final.sum()} | Voids: {void_mask_final.sum()} | Ground: {ground_mask_final.sum()}")
-
-        return {
-            'delta_r': delta_r,
-            'likelihood': likelihood_final,
-            'obs_mask': obs_mask_final,
-            'void_mask': void_mask_final,
-            'ground_mask': ground_mask_final,
-            'uncertain_mask': np.zeros(N, dtype=bool),
-            'timing_ms': timing_ms
-        }
+    # ========================================
+    # STAGE 2: DETECCIÓN DE BORDILLOS
+    # ========================================
 
     def detect_curbs(self, points: np.ndarray, ground_mask: np.ndarray) -> np.ndarray:
         """
@@ -938,11 +802,7 @@ class LidarPipelineSuite:
 
     def stage2_complete(self, points: np.ndarray) -> Dict:
         """
-        Stage 2 completo: ejecuta Stage 1 + delta-r.
-
-        Orquesta la ejecución secuencial de Stage 1 (segmentación) y
-        Stage 2 (detección de anomalías), reutilizando las normales y
-        distancias de plano calculadas en Stage 1.
+        Stages 1+2: segmentación de suelo + rechazo de paredes + detección de bordillos.
 
         Args:
             points: (N, 3) nube de puntos
@@ -960,46 +820,20 @@ class LidarPipelineSuite:
         obs_mask[stage1_result['nonground_indices']] = True
         ground_mask = ~obs_mask
 
-        # Detección de bordillos (opcional, independiente de delta-r)
+        # Stage 2: Detección de bordillos (opcional)
         curb_mask = np.zeros(N, dtype=bool)
         if self.config.enable_curb_detection:
             curb_mask = self.detect_curbs(points, ground_mask)
             obs_mask |= curb_mask
             ground_mask = ~obs_mask
 
-        if not self.config.enable_delta_r:
-            # Sin delta-r: Stage 1 + bordillos es la clasificación final
-            return {
-                **stage1_result,
-                'delta_r': np.zeros(N, dtype=np.float32),
-                'likelihood': np.where(obs_mask, 2.0, -2.0).astype(np.float32),
-                'obs_mask': obs_mask,
-                'ground_mask': ground_mask,
-                'void_mask': np.zeros(N, dtype=bool),
-                'curb_mask': curb_mask,
-                'timing_ms': stage1_result['timing_ms'],
-                'timing_total_ms': stage1_result['timing_ms'],
-            }
-
-        # Stage 2: delta-r conservador
-        stage2_result = self.compute_delta_r(
-            points=points,
-            ground_indices=stage1_result['ground_indices'],
-            n_per_point=stage1_result['n_per_point'],
-            d_per_point=stage1_result['d_per_point'],
-            nonground_indices=stage1_result['nonground_indices'],
-        )
-
-        # Combinar delta-r con bordillos
-        stage2_result['obs_mask'] |= curb_mask
-        stage2_result['ground_mask'] = ~stage2_result['obs_mask']
-        stage2_result['curb_mask'] = curb_mask
-
-        # Combinar resultados
         return {
             **stage1_result,
-            **stage2_result,
-            'timing_total_ms': stage1_result['timing_ms'] + stage2_result['timing_ms']
+            'obs_mask': obs_mask,
+            'ground_mask': ground_mask,
+            'curb_mask': curb_mask,
+            'timing_ms': stage1_result['timing_ms'],
+            'timing_total_ms': stage1_result['timing_ms'],
         }
 
     # ========================================
