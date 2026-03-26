@@ -54,9 +54,10 @@ GROUND_LABELS = np.array([40, 44, 48, 49, 60, 72], dtype=np.uint32)
 _BASE_DIR = Path(__file__).resolve().parents[2]  # sota_idea/
 _HOME = Path.home()
 
+# Usar los .bin de 3D-Curb (tienen menos puntos, coinciden con los labels)
 _VELODYNE_CANDIDATES = [
-    _BASE_DIR / "data_odometry_velodyne" / "dataset" / "sequences",
-    _HOME / "laura" / "sota_ws" / "TFG_detector" / "data_odometry_velodyne" / "dataset" / "sequences",
+    _BASE_DIR / "3d_curb_labels",
+    _HOME / "laura" / "sota_ws" / "TFG_detector" / "3d_curb_labels",
 ]
 
 _LABELS_CANDIDATES = [
